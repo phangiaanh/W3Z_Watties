@@ -20,7 +20,7 @@ from huggingface_hub import snapshot_download
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
 
 # Load model config
-path_model_cfg = 'data/.hydra/config.yaml'
+path_model_cfg = 'data/hydra/config.yaml'
 model_cfg = get_config(path_model_cfg)
 
 # Load model
