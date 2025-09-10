@@ -139,4 +139,4 @@ demo = gr.Interface(
     ],
 )
 
-demo.launch(external=True)
+demo.launch(share=True)
