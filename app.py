@@ -24,7 +24,7 @@ path_model_cfg = 'data/hydra/config.yaml'
 model_cfg = get_config(path_model_cfg)
 
 # Load model
-local_dir = "data/checkpoints/"
+local_dir = "data/"
 PATH_CHECKPOINT = os.path.join(local_dir, "checkpoint.ckpt")
 model = AMR.load_from_checkpoint(checkpoint_path=PATH_CHECKPOINT, map_location="cpu",
                                  cfg=model_cfg, strict=False, weights_only=True)

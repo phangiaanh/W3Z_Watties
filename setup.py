@@ -14,7 +14,7 @@ setup(
         'scikit-image',
         'smplx==0.1.28',
         'yacs',
-        'detectron2 @ git+https://gitclone.com/github.com/facebookresearch/detectron2',
+        'detectron2 @ file:///content/W3Z_Watties/data/detectron2-0.6-cp312-cp312-linux_x86_64.whl',
         'chumpy @ git+https://github.com/phangiaanh/W3Z_Packages.git@main#subdirectory=chumpy',
         'mmcv==1.3.9',
         'timm',
