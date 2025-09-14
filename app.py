@@ -47,6 +47,7 @@ def predict(im):
 def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     img = np.array(img["composite"])[:, :, :-1]
     boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
+    print(f"img.shape: {img.shape}")
 
     # Run AniMer on the crop image
     dataset = ViTDetDataset(model_cfg, img, boxes)
@@ -76,6 +77,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         cam_t = pred_cam_t_full[0]
         all_verts.append(verts)
         all_cam_t.append(cam_t)
+        print(f"batch['img'][0].shape: {batch['img'][0].shape}")
         regression_img = renderer(out['pred_vertices'][0].detach().cpu().numpy(),
                                   out['pred_cam_t'][0].detach().cpu().numpy(),
                                   batch['img'][0],
@@ -83,7 +85,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
                                   scene_bg_color=(1, 1, 1),
                                     )
         regression_img = cv2.cvtColor((regression_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-
+        print(f"regression_img.shape: {regression_img.shape}")
         # Render mesh onto the original image
         if len(all_verts):
             # Return mesh path
