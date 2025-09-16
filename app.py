@@ -79,7 +79,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         all_cam_t.append(cam_t)
         print(f"batch['img'][0].shape: {batch['img'][0].shape}")
         regression_img = renderer(out['pred_vertices'][0].detach().cpu().numpy(),
-                                  out['pred_cam_t'][0].detach().cpu().numpy(),
+                                  pred_cam_t_full[0].detach().cpu().numpy(),
                                   batch['img'][0],
                                   mesh_base_color=LIGHT_BLUE,
                                   scene_bg_color=(1, 1, 1),
@@ -108,7 +108,7 @@ demo = gr.Interface(
         sources=("upload", "clipboard"),
         brush=False,
         eraser=False,
-        crop_size="1:1",
+        # crop_size="1:1",
         layers=False,
         placeholder="Upload an image or select from the examples.",
     ),
