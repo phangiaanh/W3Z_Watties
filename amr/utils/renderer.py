@@ -211,8 +211,17 @@ class Renderer:
         camera_pose = np.eye(4)
         camera_pose[:3, 3] = camera_translation
         camera_center = [image.shape[1] / 2., image.shape[0] / 2.]
-        camera = pyrender.IntrinsicsCamera(fx=self.focal_length, fy=self.focal_length,
-                                           cx=camera_center[0], cy=camera_center[1], zfar=1e12)
+        # Scale focal length based on image size
+        image_height, image_width = image.shape[:2]
+        scale_factor = max(image_height, image_width) / self.img_res
+        scaled_focal_length = self.focal_length * scale_factor
+        camera = pyrender.IntrinsicsCamera(
+            fx=scaled_focal_length, 
+            fy=scaled_focal_length,
+            cx=camera_center[0], 
+            cy=camera_center[1], 
+            zfar=1e12
+        )
         scene.add(camera, pose=camera_pose)
 
         light_nodes = create_raymond_lights()

@@ -110,7 +110,7 @@ demo = gr.Interface(
         sources=("upload", "clipboard"),
         brush=False,
         eraser=False,
-        crop_size="1:1",
+        # crop_size="1:1",
         layers=False,
         placeholder="Upload an image or select from the examples.",
     ),
