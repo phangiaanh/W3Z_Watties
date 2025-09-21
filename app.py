@@ -17,6 +17,11 @@ from amr.datasets.vitdet_dataset import ViTDetDataset, DEFAULT_MEAN, DEFAULT_STD
 from amr.utils.renderer import Renderer, cam_crop_to_full
 from huggingface_hub import snapshot_download
 
+
+from depthfm import DepthFM
+import matplotlib.pyplot as plt
+
+
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
 
 # Load model config
@@ -28,9 +33,12 @@ local_dir = "data/"
 PATH_CHECKPOINT = os.path.join(local_dir, "checkpoint.ckpt")
 model = AMR.load_from_checkpoint(checkpoint_path=PATH_CHECKPOINT, map_location="cpu",
                                  cfg=model_cfg, strict=False, weights_only=True)
+depth_model = DepthFM(os.path.join(local_dir, "depthfm-v1.ckpt"))
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 model = model.to(device)
+depth_model = depth_model.to(device)
 model.eval()
+depth_model.eval()
 
 # Setup the renderer
 renderer = Renderer(model_cfg, faces=model.smal.faces)
@@ -50,6 +58,10 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     print(f"img.shape: {img.shape}")
     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to (3, H, W) and normalize to [0,1]
     img_tensor = img_tensor.to(device)
+
+    orin_img = np.array(img["background"])[:, :, :-1]
+    depth_tensor = torch.from_numpy(orin_img).permute(2, 0, 1).float() / 127.5 - 1
+    depth_tensor = depth_tensor.to(device)
 
     # Run AniMer on the crop image
     dataset = ViTDetDataset(model_cfg, img, boxes)
@@ -89,6 +101,12 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         regression_img = cv2.cvtColor((regression_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         print(f"regression_img.shape: {regression_img.shape}")
         # Render mesh onto the original image
+
+        with torch.autocast(device_type="cuda"):
+            depth = model.predict_depth(depth_tensor, num_steps=2, ensemble_size=4)
+        depth = depth.squeeze(0).squeeze(0).cpu().numpy() 
+        depth = plt.get_cmap('magma')(depth, bytes=True)[..., :3]
+
         if len(all_verts):
             # Return mesh path
             trimeshes = [renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) for vvv,ttt in zip(all_verts, all_cam_t)]
@@ -98,9 +116,9 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
             mesh_name = os.path.join(OUTPUT_FOLDER, next(tempfile._get_candidate_names()) + '.obj')
             trimesh.exchange.export.export_mesh(mesh, mesh_name)
 
-            return (regression_img, mesh_name)
+            return (regression_img, mesh_name, depth)
         else:
-            return (None, [])
+            return (None, [], None)
 
 
 demo = gr.Interface(
@@ -117,6 +135,7 @@ demo = gr.Interface(
     outputs=[
         gr.Image(label="Overlap image"),
         gr.Model3D(display_mode="wireframe", label="3D Mesh"),
+        gr.Image(label="Depth image"),
     ],
     title="Watties: 3D Quadruped Animal Pose and Shape Estimation",
     description="""

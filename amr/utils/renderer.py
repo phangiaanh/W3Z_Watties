@@ -250,8 +250,9 @@ class Renderer:
         #     metallicFactor=0.0,
         #     alphaMode='OPAQUE',
         #     baseColorFactor=(*mesh_base_color, 1.0))
-        vertex_colors = np.array([(*mesh_base_color, 1.0)] * vertices.shape[0])
-        mesh = trimesh.Trimesh(vertices.copy() + camera_translation, self.faces.copy(), vertex_colors=vertex_colors)
+        # vertex_colors = np.array([(*mesh_base_color, 1.0)] * vertices.shape[0])
+        mesh = trimesh.Trimesh(vertices.copy() + camera_translation, self.faces.copy())
+        # mesh = trimesh.Trimesh(vertices.copy() + camera_translation, self.faces.copy(), vertex_colors=vertex_colors)
         # mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())
 
         rot = trimesh.transformations.rotation_matrix(

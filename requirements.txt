@@ -1,0 +1,10 @@
+numpy
+einops
+omegaconf
+matplotlib
+accelerate>=0.22.0
+torch
+torchdiffeq>=0.2.3
+diffusers
+huggingface_hub
+xformers
