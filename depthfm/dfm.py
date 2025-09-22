@@ -22,7 +22,7 @@ class DepthFM(nn.Module):
         self.scale_factor = 0.18215
 
         # set with checkpoint
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         self.noising_step = ckpt['noising_step']
         self.empty_text_embed = ckpt['empty_text_embedding']
         self.model = UNetModel(**ckpt['ldm_hparams'])

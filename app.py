@@ -53,15 +53,17 @@ def predict(im):
 
 
 def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
+    orin_img = np.array(img["background"])[:, :, :-1]
     img = np.array(img["composite"])[:, :, :-1]
     boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
     print(f"img.shape: {img.shape}")
     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to (3, H, W) and normalize to [0,1]
     img_tensor = img_tensor.to(device)
 
-    orin_img = np.array(img["background"])[:, :, :-1]
-    depth_tensor = torch.from_numpy(orin_img).permute(2, 0, 1).float() / 127.5 - 1
+    
+    depth_tensor = torch.from_numpy(orin_img).permute(2, 0, 1).float()[None] / 127.5 - 1
     depth_tensor = depth_tensor.to(device)
+    print(f"img.shape: {depth_tensor.shape}")
 
     # Run AniMer on the crop image
     dataset = ViTDetDataset(model_cfg, img, boxes)
@@ -103,7 +105,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         # Render mesh onto the original image
 
         with torch.autocast(device_type="cuda"):
-            depth = model.predict_depth(depth_tensor, num_steps=2, ensemble_size=4)
+            depth = depth_model.predict_depth(depth_tensor, num_steps=2, ensemble_size=4)
         depth = depth.squeeze(0).squeeze(0).cpu().numpy() 
         depth = plt.get_cmap('magma')(depth, bytes=True)[..., :3]
 
