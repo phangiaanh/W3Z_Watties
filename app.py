@@ -17,6 +17,7 @@ from amr.datasets.vitdet_dataset import ViTDetDataset, DEFAULT_MEAN, DEFAULT_STD
 from amr.utils.renderer import Renderer, cam_crop_to_full
 from huggingface_hub import snapshot_download
 
+import torch.nn.functional as F
 
 from depthfm import DepthFM
 import matplotlib.pyplot as plt
@@ -48,9 +49,39 @@ OUTPUT_FOLDER = "demo_out"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 
+def resize_max_res_tensor(
+    img: torch.Tensor, 
+    max_edge_resolution: int, 
+    mode: str = "bilinear"
+) -> tuple[torch.Tensor, tuple[int, int]]:
+    
+    # Ensure shape (1, C, H, W)
+    if img.ndim == 3:
+        img = img.unsqueeze(0)
+    elif img.ndim != 4:
+        raise ValueError("img must have shape (C, H, W) or (1, C, H, W)")
+
+    _, C, H, W = img.shape
+
+    # Downscale factor
+    downscale_factor = min(max_edge_resolution / W, max_edge_resolution / H)
+    new_W = int(W * downscale_factor)
+    new_H = int(H * downscale_factor)
+
+    # Round to multiples of 64
+    new_W = max(64, round(new_W / 64) * 64)
+    new_H = max(64, round(new_H / 64) * 64)
+
+    print(f"Resizing tensor from {W}x{H} to {new_W}x{new_H}")
+
+    # Resize with interpolation
+    resized = F.interpolate(img, size=(new_H, new_W), mode=mode, align_corners=False)
+
+    # Return to (1, C, H, W)
+    return resized, (W, H)
+
 def predict(im):
     return im["composite"]
-
 
 def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     orin_img = np.array(img["background"])[:, :, :-1]
@@ -62,6 +93,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
 
     
     depth_tensor = torch.from_numpy(orin_img).permute(2, 0, 1).float()[None] / 127.5 - 1
+    depth_tensor, _ = resize_max_res_tensor(depth_tensor, max_edge_resolution=max(depth_tensor.shape))
     depth_tensor = depth_tensor.to(device)
     print(f"img.shape: {depth_tensor.shape}")
 
