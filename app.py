@@ -154,46 +154,46 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         else:
             return (None, [], None)
 
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Interface(
+        fn=inference,
+        analytics_enabled=False,
+        inputs=gr.ImageEditor(
+            sources=("upload", "clipboard"),
+            brush=False,
+            eraser=False,
+            # crop_size="1:1",
+            layers=False,
+            placeholder="Upload an image or select from the examples.",
+        ),
+        outputs=[
+            gr.Image(label="Overlap image"),
+            gr.Model3D(display_mode="wireframe", label="3D Mesh"),
+            gr.Image(label="Depth image"),
+        ],
+        title="Watties: 3D Quadruped Animal Pose and Shape Estimation",
+        description="""
+        Project page: https://github.com/phangiaanh
+        Author: pganh.sdh221
 
-demo = gr.Interface(
-    fn=inference,
-    analytics_enabled=False,
-    inputs=gr.ImageEditor(
-        sources=("upload", "clipboard"),
-        brush=False,
-        eraser=False,
-        # crop_size="1:1",
-        layers=False,
-        placeholder="Upload an image or select from the examples.",
-    ),
-    outputs=[
-        gr.Image(label="Overlap image"),
-        gr.Model3D(display_mode="wireframe", label="3D Mesh"),
-        gr.Image(label="Depth image"),
-    ],
-    title="Watties: 3D Quadruped Animal Pose and Shape Estimation",
-    description="""
-    Project page: https://github.com/phangiaanh
-    Author: pganh.sdh221
+        ## Usage
+        1. **Input**: Select an example image or upload your own.
+        2. **Processing**: Crop the image to a square.
+        3. **Output**:
+        - 2D mesh overlay on the original image
+        - Interactive 3D model visualization
 
-    ## Usage
-    1. **Input**: Select an example image or upload your own.
-    2. **Processing**: Crop the image to a square.
-    3. **Output**:
-    - 2D mesh overlay on the original image
-    - Interactive 3D model visualization
-    
-    The demo is for academic purposes only.
-    
-    """,
+        The demo is for academic purposes only.
 
-    examples=[
-        'example_data/cow.jpg',
-        'example_data/dog.jpg',
-        'example_data/hippo.jpg',
-        'example_data/horse.jpg',
-        'example_data/tiger.jpg',
-    ],
-)
+        """,
+
+        examples=[
+            'example_data/cow.jpg',
+            'example_data/dog.jpg',
+            'example_data/hippo.jpg',
+            'example_data/horse.jpg',
+            'example_data/tiger.jpg',
+        ],
+    )
 
 demo.launch(share=True)
