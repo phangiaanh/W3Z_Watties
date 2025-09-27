@@ -16,6 +16,7 @@ from amr.utils import recursive_to
 from amr.datasets.vitdet_dataset import ViTDetDataset, DEFAULT_MEAN, DEFAULT_STD
 from amr.utils.renderer import Renderer, cam_crop_to_full
 from huggingface_hub import snapshot_download
+from ultralytics import YOLO
 
 import torch.nn.functional as F
 
@@ -35,6 +36,7 @@ PATH_CHECKPOINT = os.path.join(local_dir, "checkpoint.ckpt")
 model = AMR.load_from_checkpoint(checkpoint_path=PATH_CHECKPOINT, map_location="cpu",
                                  cfg=model_cfg, strict=False, weights_only=True)
 depth_model = DepthFM(os.path.join(local_dir, "depthfm-v1.ckpt"))
+yolo_model = YOLO("yolo11n.pt")
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 model = model.to(device)
 depth_model = depth_model.to(device)
@@ -86,7 +88,26 @@ def predict(im):
 def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     orin_img = np.array(img["background"])[:, :, :-1]
     img = np.array(img["composite"])[:, :, :-1]
-    boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
+
+    results = yolo_model(img)
+
+    boxes = []
+    if len(results) > 0 and results[0].boxes is not None:
+        # Get all detected boxes
+        for box in results[0].boxes:
+            # Convert from xywh to xyxy format
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            boxes.append([x1, y1, x2, y2])
+    
+    # If no detections, fall back to full image
+    if len(boxes) == 0:
+        boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
+        print("No YOLO detections found, using full image")
+    else:
+        boxes = np.array(boxes)
+        print(f"Found {len(boxes)} YOLO detections")
+
+    # boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
     print(f"img.shape: {img.shape}")
     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to (3, H, W) and normalize to [0,1]
     img_tensor = img_tensor.to(device)

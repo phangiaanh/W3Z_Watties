@@ -8,3 +8,4 @@ torchdiffeq>=0.2.3
 diffusers
 huggingface_hub
 xformers
+ultralytics
