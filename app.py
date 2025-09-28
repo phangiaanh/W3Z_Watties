@@ -107,6 +107,14 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         boxes = np.array(boxes)
         print(f"Found {len(boxes)} YOLO detections")
 
+    annotated_img = img.copy()
+    for box in boxes:
+        x1, y1, x2, y2 = box.astype(int)
+        # Draw bounding box
+        cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        # Add label
+        cv2.putText(annotated_img, "Detected", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
     # boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
     print(f"img.shape: {img.shape}")
     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to (3, H, W) and normalize to [0,1]
@@ -171,7 +179,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
             mesh_name = os.path.join(OUTPUT_FOLDER, next(tempfile._get_candidate_names()) + '.obj')
             trimesh.exchange.export.export_mesh(mesh, mesh_name)
 
-            return (regression_img, mesh_name, depth)
+            return ([regression_img, annotated_img], mesh_name, depth)
         else:
             return (None, [], None)
 
@@ -188,7 +196,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             placeholder="Upload an image or select from the examples.",
         ),
         outputs=[
-            gr.Image(label="Overlap image"),
+            gr.Gallery(label="Output images"),
             gr.Model3D(display_mode="wireframe", label="3D Mesh"),
             gr.Image(label="Depth image"),
         ],
