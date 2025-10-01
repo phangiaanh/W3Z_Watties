@@ -155,13 +155,15 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         all_verts.append(verts)
         all_cam_t.append(cam_t)
         print(f"batch['img'][0].shape: {batch['img'][0].shape}")
-        regression_img = renderer(out['pred_vertices'][0].detach().cpu().numpy(),
-                                  out['pred_cam_t'][0].detach().cpu().numpy(),
+        regression_img = renderer([x.detach().cpu().numpy() for x in out['pred_vertices']],
+                                  [x.detach().cpu().numpy() for x in out['pred_cam_t']],
                                   img_tensor,
                                   mesh_base_color=LIGHT_BLUE,
                                   scene_bg_color=(1, 1, 1),
+                                  boxes=boxes,
                                 )
-        regression_img = cv2.cvtColor((regression_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        regression_img = (regression_img * 255).astype(np.uint8)
+        # regression_img = cv2.cvtColor((regression_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         print(f"regression_img.shape: {regression_img.shape}")
         # Render mesh onto the original image
 

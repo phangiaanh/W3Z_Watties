@@ -8,7 +8,7 @@ import pyrender
 import trimesh
 import cv2
 from yacs.config import CfgNode
-from typing import List, Optional
+from typing import List, Optional, Union
 
 
 def cam_crop_to_full(cam_bbox, box_center, box_size, img_size, focal_length=5000.):
@@ -140,6 +140,77 @@ def create_raymond_lights() -> List[pyrender.Node]:
     return nodes
 
 
+def print_parameter_shapes(vertices, camera_translation, image, full_frame, imgname, 
+                          side_view, rot_angle, mesh_base_color, scene_bg_color, 
+                          return_rgba, boxes):
+    """
+    Print shapes and dimensions of all parameters for debugging purposes.
+    """
+    print("=== Parameter Shapes/Dimensions ===")
+    
+    # vertices
+    print(f"vertices: {type(vertices)}")
+    if isinstance(vertices, np.ndarray):
+        print(f"  - Shape: {vertices.shape}")
+        print(f"  - Data type: {vertices.dtype}")
+    elif isinstance(vertices, list):
+        print(f"  - List length: {len(vertices)}")
+        for i, v in enumerate(vertices):
+            print(f"  - vertices[{i}] shape: {v.shape}, dtype: {v.dtype}")
+    
+    # camera_translation
+    print(f"camera_translation: {type(camera_translation)}")
+    if isinstance(camera_translation, np.ndarray):
+        print(f"  - Shape: {camera_translation.shape}")
+        print(f"  - Data type: {camera_translation.dtype}")
+    elif isinstance(camera_translation, list):
+        print(f"  - List length: {len(camera_translation)}")
+        for i, ct in enumerate(camera_translation):
+            print(f"  - camera_translation[{i}] shape: {ct.shape}, dtype: {ct.dtype}")
+    
+    # image
+    print(f"image: {type(image)}")
+    print(f"  - Shape: {image.shape}")
+    print(f"  - Data type: {image.dtype}")
+    print(f"  - Device: {image.device}")
+    
+    # full_frame
+    print(f"full_frame: {type(full_frame)} = {full_frame}")
+    
+    # imgname
+    print(f"imgname: {type(imgname)} = {imgname}")
+    
+    # side_view
+    print(f"side_view: {type(side_view)} = {side_view}")
+    
+    # rot_angle
+    print(f"rot_angle: {type(rot_angle)} = {rot_angle}")
+    
+    # mesh_base_color
+    print(f"mesh_base_color: {type(mesh_base_color)} = {mesh_base_color}")
+    if isinstance(mesh_base_color, (list, tuple)):
+        print(f"  - Length: {len(mesh_base_color)}")
+    
+    # scene_bg_color
+    print(f"scene_bg_color: {type(scene_bg_color)} = {scene_bg_color}")
+    if isinstance(scene_bg_color, (list, tuple)):
+        print(f"  - Length: {len(scene_bg_color)}")
+    
+    # return_rgba
+    print(f"return_rgba: {type(return_rgba)} = {return_rgba}")
+    
+    # boxes
+    print(f"boxes: {type(boxes)}")
+    if boxes is not None:
+        print(f"  - List length: {len(boxes)}")
+        for i, box in enumerate(boxes):
+            print(f"  - boxes[{i}]: {box} (length: {len(box)})")
+    else:
+        print("  - None")
+    
+    print("===================================")
+
+
 class Renderer:
 
     def __init__(self, cfg: CfgNode, faces: np.array):
@@ -157,91 +228,202 @@ class Renderer:
         self.faces = faces.cpu().numpy()
 
     def __call__(self,
-                 vertices: np.array,
-                 camera_translation: np.array,
-                 image: torch.Tensor,
-                 full_frame: bool = False,
-                 imgname: Optional[str] = None,
-                 side_view=False, rot_angle=90,
-                 mesh_base_color=(1.0, 1.0, 0.9),
-                 scene_bg_color=(0, 0, 0),
-                 return_rgba=False,
-                 ) -> np.array:
+             vertices: Union[np.array, List[np.array]],
+             camera_translation: Union[np.array, List[np.array]],
+             image: torch.Tensor,
+             full_frame: bool = False,
+             imgname: Optional[str] = None,
+             side_view=False, rot_angle=90,
+             mesh_base_color=(1.0, 1.0, 0.9),
+             scene_bg_color=(0, 0, 0),
+             return_rgba=False,
+             boxes: Optional[List[List[int]]] = None,
+             ) -> np.array:
         """
         Render meshes on input image
         Args:
-            vertices (np.array): Array of shape (V, 3) containing the mesh vertices.
-            camera_translation (np.array): Array of shape (3,) with the camera translation.
+            vertices (Union[np.array, List[np.array]]): Single array of shape (V, 3) or list of arrays for multiple meshes.
+            camera_translation (Union[np.array, List[np.array]]): Single array of shape (3,) or list of arrays for multiple meshes.
             image (torch.Tensor): Tensor of shape (3, H, W) containing the image crop with normalized pixel values.
             full_frame (bool): If True, then render on the full image.
             imgname (Optional[str]): Contains the original image filenamee. Used only if full_frame == True.
+            boxes (Optional[List[List[int]]]): List of bounding boxes [x1, y1, x2, y2] for each mesh. 
+                                             If provided, each mesh will be rendered in its corresponding box area.
         """
-
+        
+        # Print parameter shapes for debugging
+        print_parameter_shapes(vertices, camera_translation, image, full_frame, imgname,
+                              side_view, rot_angle, mesh_base_color, scene_bg_color,
+                              return_rgba, boxes)
+        
+        # Convert single inputs to lists for uniform processing
+        if isinstance(vertices, np.ndarray):
+            vertices = [vertices]
+        if isinstance(camera_translation, np.ndarray):
+            camera_translation = [camera_translation]
+        
+        # Handle colors - if single color provided, use for all meshes
+        if isinstance(mesh_base_color, tuple):
+            mesh_base_colors = [mesh_base_color] * len(vertices)
+        else:
+            mesh_base_colors = mesh_base_color
+    
         if full_frame:
             image = cv2.imread(imgname).astype(np.float32)[:, :, ::-1] / 255.
         else:
-            image = (image.clone()) * (torch.tensor(self.cfg.MODEL.IMAGE_STD, device=image.device).reshape(3, 1, 1))
-            image = image + torch.tensor(self.cfg.MODEL.IMAGE_MEAN, device=image.device).reshape(3, 1, 1)
+            #image = (image.clone()) * (torch.tensor(self.cfg.MODEL.IMAGE_STD, device=image.device).reshape(3, 1, 1))
+            #image = image + torch.tensor(self.cfg.MODEL.IMAGE_MEAN, device=image.device).reshape(3, 1, 1)
             image = image.permute(1, 2, 0).cpu().numpy()
-
-        renderer = pyrender.OffscreenRenderer(viewport_width=image.shape[1],
-                                              viewport_height=image.shape[0],
-                                              point_size=1.0)
-        material = pyrender.MetallicRoughnessMaterial(
-            metallicFactor=0.0,
-            alphaMode='OPAQUE',
-            baseColorFactor=(*mesh_base_color, 1.0))
-
-        camera_translation[0] *= -1.
-
-        mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())
-        if side_view:
-            rot = trimesh.transformations.rotation_matrix(
-                np.radians(rot_angle), [0, 1, 0])
-            mesh.apply_transform(rot)
-        rot = trimesh.transformations.rotation_matrix(
-            np.radians(180), [1, 0, 0])
-        mesh.apply_transform(rot)
-        mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
-
-        scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
-                               ambient_light=(0.3, 0.3, 0.3))
-        scene.add(mesh, 'mesh')
-
-        camera_pose = np.eye(4)
-        camera_pose[:3, 3] = camera_translation
-        camera_center = [image.shape[1] / 2., image.shape[0] / 2.]
-        # Scale focal length based on image size
-        image_height, image_width = image.shape[:2]
-        scale_factor = max(image_height, image_width) / self.img_res
-        scaled_focal_length = self.focal_length * scale_factor
-        camera = pyrender.IntrinsicsCamera(
-            fx=scaled_focal_length, 
-            fy=scaled_focal_length,
-            cx=camera_center[0], 
-            cy=camera_center[1], 
-            zfar=1e12
-        )
-        scene.add(camera, pose=camera_pose)
-
-        light_nodes = create_raymond_lights()
-        for node in light_nodes:
-            scene.add_node(node)
-
-        color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-        color = color.astype(np.float32) / 255.0
-        renderer.delete()
-
-        if return_rgba:
-            return color
-
-        valid_mask = (color[:, :, -1])[:, :, np.newaxis]
-        if not side_view:
-            output_img = (color[:, :, :3] * valid_mask + (1 - valid_mask) * image)
+    
+        # If boxes are provided, render each mesh in its corresponding box
+        if boxes is not None:
+            if len(boxes) != len(vertices):
+                raise ValueError(f"Number of boxes ({len(boxes)}) must match number of meshes ({len(vertices)})")
+            
+            output_img = image.copy()
+            
+            for i, (verts, cam_trans, box, color) in enumerate(zip(vertices, camera_translation, boxes, mesh_base_colors)):
+                print(f"Box {i}: {box} (type: {type(box)})")
+                x1, y1, x2, y2 = [int(coord) for coord in box]
+                box_width = x2 - x1
+                box_height = y2 - y1
+                
+                # Create renderer for this specific box
+                renderer = pyrender.OffscreenRenderer(viewport_width=box_width,
+                                                      viewport_height=box_height,
+                                                      point_size=1.0)
+                
+                # Create material for this mesh
+                material = pyrender.MetallicRoughnessMaterial(
+                    metallicFactor=0.0,
+                    alphaMode='OPAQUE',
+                    baseColorFactor=(*color, 1.0))
+    
+                cam_trans = cam_trans.copy()
+                cam_trans[0] *= -1.
+    
+                # Create mesh
+                mesh = trimesh.Trimesh(verts.copy(), self.faces.copy())
+                if side_view:
+                    rot = trimesh.transformations.rotation_matrix(
+                        np.radians(rot_angle), [0, 1, 0])
+                    mesh.apply_transform(rot)
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(180), [1, 0, 0])
+                mesh.apply_transform(rot)
+                mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+    
+                # Create scene
+                scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
+                                       ambient_light=(0.3, 0.3, 0.3))
+                scene.add(mesh, f'mesh_{i}')
+    
+                # Set up camera for this box
+                camera_pose = np.eye(4)
+                camera_pose[:3, 3] = cam_trans
+                
+                # Calculate camera center relative to the box
+                camera_center = [box_width / 2., box_height / 2.]
+                
+                # Scale focal length based on box size
+                scale_factor = max(box_height, box_width) / self.img_res
+                scaled_focal_length = self.focal_length * scale_factor
+                
+                camera = pyrender.IntrinsicsCamera(
+                    fx=scaled_focal_length, 
+                    fy=scaled_focal_length,
+                    cx=camera_center[0], 
+                    cy=camera_center[1], 
+                    zfar=1e12
+                )
+                scene.add(camera, pose=camera_pose)
+    
+                # Add lighting
+                light_nodes = create_raymond_lights()
+                for node in light_nodes:
+                    scene.add_node(node)
+    
+                # Render this mesh
+                color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+                color = color.astype(np.float32) / 255.0
+                renderer.delete()
+    
+                if return_rgba:
+                    # For RGBA mode, return the last rendered result
+                    output_img = color
+                else:
+                    # Composite this mesh onto the output image
+                    valid_mask = (color[:, :, -1])[:, :, np.newaxis]
+                    if not side_view:
+                        rendered_mesh = color[:, :, :3] * valid_mask + (1 - valid_mask) * image[y1:y2, x1:x2]
+                    else:
+                        rendered_mesh = color[:, :, :3]
+                    
+                    # Place the rendered mesh in the correct box area
+                    output_img[y1:y2, x1:x2] = rendered_mesh
+            
+            return output_img.astype(np.float32)
+        
         else:
-            output_img = color[:, :, :3]
-
-        output_img = output_img.astype(np.float32)
+            # Original single mesh rendering logic
+            renderer = pyrender.OffscreenRenderer(viewport_width=image.shape[1],
+                                                  viewport_height=image.shape[0],
+                                                  point_size=1.0)
+            material = pyrender.MetallicRoughnessMaterial(
+                metallicFactor=0.0,
+                alphaMode='OPAQUE',
+                baseColorFactor=(*mesh_base_colors[0], 1.0))
+    
+            camera_translation[0] *= -1.
+    
+            mesh = trimesh.Trimesh(vertices[0].copy(), self.faces.copy())
+            if side_view:
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(rot_angle), [0, 1, 0])
+                mesh.apply_transform(rot)
+            rot = trimesh.transformations.rotation_matrix(
+                np.radians(180), [1, 0, 0])
+            mesh.apply_transform(rot)
+            mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+    
+            scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
+                                   ambient_light=(0.3, 0.3, 0.3))
+            scene.add(mesh, 'mesh')
+    
+            camera_pose = np.eye(4)
+            camera_pose[:3, 3] = camera_translation[0]
+            camera_center = [image.shape[1] / 2., image.shape[0] / 2.]
+            # Scale focal length based on image size
+            image_height, image_width = image.shape[:2]
+            scale_factor = max(image_height, image_width) / self.img_res
+            scaled_focal_length = self.focal_length * scale_factor
+            camera = pyrender.IntrinsicsCamera(
+                fx=scaled_focal_length, 
+                fy=scaled_focal_length,
+                cx=camera_center[0], 
+                cy=camera_center[1], 
+                zfar=1e12
+            )
+            scene.add(camera, pose=camera_pose)
+    
+            light_nodes = create_raymond_lights()
+            for node in light_nodes:
+                scene.add_node(node)
+    
+            color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+            color = color.astype(np.float32) / 255.0
+            renderer.delete()
+    
+            if return_rgba:
+                return color
+    
+            valid_mask = (color[:, :, -1])[:, :, np.newaxis]
+            if not side_view:
+                output_img = (color[:, :, :3] * valid_mask + (1 - valid_mask) * image)
+            else:
+                output_img = color[:, :, :3]
+    
+            output_img = output_img.astype(np.float32)
         return output_img
 
     def vertices_to_trimesh(self, vertices, camera_translation, mesh_base_color=(1.0, 1.0, 0.9),
