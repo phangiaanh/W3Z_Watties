@@ -128,7 +128,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
 
     # Run AniMer on the crop image
     dataset = ViTDetDataset(model_cfg, img, boxes)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=10)
     all_verts = []
     all_cam_t = []
     temp_name = next(tempfile._get_candidate_names())
@@ -204,15 +204,17 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         ],
         title="Watties: 3D Quadruped Animal Pose and Shape Estimation",
         description="""
-        Project page: https://github.com/phangiaanh
+        Project page: https://github.com/phangiaanh  
+
         Author: pganh.sdh221
 
         ## Usage
         1. **Input**: Select an example image or upload your own.
-        2. **Processing**: Crop the image to a square.
-        3. **Output**:
-        - 2D mesh overlay on the original image
+        2. **Output**:
+        - Animal detection and bounding box on the original image
+        - Multiple 2D mesh overlays on the original image
         - Interactive 3D model visualization
+        - Depth estimation visualization 
 
         The demo is for academic purposes only.
 
