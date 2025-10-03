@@ -22,6 +22,9 @@ import torch.nn.functional as F
 
 from depthfm import DepthFM
 import matplotlib.pyplot as plt
+import json
+import pickle
+from datetime import datetime
 
 
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
@@ -89,6 +92,10 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     orin_img = np.array(img["background"])[:, :, :-1]
     img = np.array(img["composite"])[:, :, :-1]
 
+    # Generate unique timestamp for this inference
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+    inference_id = f"inference_{timestamp}"
+
     results = yolo_model(img)
 
     boxes = []
@@ -107,6 +114,13 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         boxes = np.array(boxes)
         print(f"Found {len(boxes)} YOLO detections")
 
+    # Save bounding boxes info
+    boxes_info = {
+        "boxes": boxes.tolist(),
+        "num_detections": len(boxes),
+        "image_shape": img.shape
+    }
+
     annotated_img = img.copy()
     for box in boxes:
         x1, y1, x2, y2 = box.astype(int)
@@ -115,7 +129,6 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         # Add label
         cv2.putText(annotated_img, "Detected", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    # boxes = np.array([[0, 0, img.shape[1], img.shape[0]]])  # x1, y1, x2, y2
     print(f"img.shape: {img.shape}")
     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to (3, H, W) and normalize to [0,1]
     img_tensor = img_tensor.to(device)
@@ -131,11 +144,25 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=10)
     all_verts = []
     all_cam_t = []
+    all_model_outputs = []  # Store all model outputs
     temp_name = next(tempfile._get_candidate_names())
+    
     for batch in tqdm(dataloader):
         batch = recursive_to(batch, device)
         with torch.no_grad():
             out = model(batch)
+
+        # Store model output
+        model_output = {
+            "pred_vertices": out['pred_vertices'].detach().cpu().numpy(),
+            "pred_cam": out['pred_cam'].detach().cpu().numpy(),
+            "batch_info": {
+                "box_center": batch["box_center"].detach().cpu().numpy(),
+                "box_size": batch["box_size"].detach().cpu().numpy(),
+                "img_size": batch["img_size"].detach().cpu().numpy()
+            }
+        }
+        all_model_outputs.append(model_output)
 
         pred_cam = out['pred_cam']
         box_center = batch["box_center"].float()
@@ -163,14 +190,60 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
                                   boxes=boxes,
                                 )
         regression_img = (regression_img * 255).astype(np.uint8)
-        # regression_img = cv2.cvtColor((regression_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         print(f"regression_img.shape: {regression_img.shape}")
-        # Render mesh onto the original image
 
         with torch.autocast(device_type="cuda"):
             depth = depth_model.predict_depth(depth_tensor, num_steps=2, ensemble_size=4)
         depth = depth.squeeze(0).squeeze(0).cpu().numpy() 
-        depth = plt.get_cmap('magma')(depth, bytes=True)[..., :3]
+        depth_colored = plt.get_cmap('magma')(depth, bytes=True)[..., :3]
+
+        # Save all inference data
+        inference_data = {
+            "inference_id": inference_id,
+            "timestamp": timestamp,
+            "model_outputs": all_model_outputs,
+            "boxes_info": boxes_info,
+            "depth_output": {
+                "depth_map": depth,  # Raw depth values
+                "depth_colored": depth_colored,  # Colored depth for visualization
+                "depth_tensor_shape": depth_tensor.shape
+            },
+            "final_vertices": all_verts,
+            "final_cam_translations": all_cam_t,
+            "image_info": {
+                "original_shape": orin_img.shape,
+                "composite_shape": img.shape
+            }
+        }
+
+        # Create inference-specific directory
+        inference_dir = os.path.join(OUTPUT_FOLDER, inference_id)
+        os.makedirs(inference_dir, exist_ok=True)
+
+        # Save as pickle for complete data preservation
+        with open(os.path.join(inference_dir, "inference_data.pkl"), "wb") as f:
+            pickle.dump(inference_data, f)
+
+        # Save as JSON for human-readable format (excluding large arrays)
+        json_data = {
+            "inference_id": inference_id,
+            "timestamp": timestamp,
+            "boxes_info": boxes_info,
+            "image_info": inference_data["image_info"],
+            "num_model_outputs": len(all_model_outputs),
+            "num_vertices": len(all_verts),
+            "depth_shape": depth.shape
+        }
+        with open(os.path.join(inference_dir, "inference_summary.json"), "w") as f:
+            json.dump(json_data, f, indent=2)
+
+        # Save individual components
+        np.save(os.path.join(inference_dir, "depth_map.npy"), depth)
+        np.save(os.path.join(inference_dir, "boxes.npy"), boxes)
+        np.save(os.path.join(inference_dir, "vertices.npy"), np.array(all_verts))
+        np.save(os.path.join(inference_dir, "cam_translations.npy"), np.array(all_cam_t))
+
+        print(f"Saved inference data to: {inference_dir}")
 
         if len(all_verts):
             # Return mesh path
@@ -178,10 +251,10 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
             # Join meshes
             mesh = trimesh.util.concatenate(trimeshes)
             # Save mesh to file
-            mesh_name = os.path.join(OUTPUT_FOLDER, next(tempfile._get_candidate_names()) + '.obj')
+            mesh_name = os.path.join(inference_dir, "mesh.obj")
             trimesh.exchange.export.export_mesh(mesh, mesh_name)
 
-            return ([regression_img, annotated_img], mesh_name, depth)
+            return ([regression_img, annotated_img], mesh_name, depth_colored)
         else:
             return (None, [], None)
 
