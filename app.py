@@ -179,8 +179,10 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
 
         verts = out['pred_vertices'][0].detach().cpu().numpy()
         cam_t = pred_cam_t_full[0]
-        all_verts.append(verts)
-        all_cam_t.append(cam_t)
+        # all_verts.append(verts)
+        # all_cam_t.append(cam_t)
+        all_verts = [verts.detach().cpu().numpy() for verts in out['pred_vertices']]
+        all_cam_t = out['pred_cam_t']
         print(f"batch['img'][0].shape: {batch['img'][0].shape}")
         regression_img = renderer([x.detach().cpu().numpy() for x in out['pred_vertices']],
                                   [x.detach().cpu().numpy() for x in out['pred_cam_t']],
