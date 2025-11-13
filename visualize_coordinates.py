@@ -47,8 +47,31 @@ renderer = Renderer(model_cfg, faces=faces)
 
 # Create the mesh using the same transformations as in app.py
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
-trimeshes = [renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) 
-             for vvv, ttt in zip(all_verts, all_cam_t)]
+
+# Define color cycle: red, blue, yellow, green, cyan, magenta, orange, purple, etc.
+COLORS = [
+    (1.0, 0.0, 0.0),      # Red
+    (0.0, 0.0, 1.0),      # Blue
+    (1.0, 1.0, 0.0),      # Yellow
+    (0.0, 1.0, 0.0),      # Green
+    (0.0, 1.0, 1.0),      # Cyan
+    (1.0, 0.0, 1.0),      # Magenta
+    (1.0, 0.647, 0.0),    # Orange
+    (0.5, 0.0, 0.5),      # Purple
+    (1.0, 0.752, 0.796),  # Pink
+    (0.0, 0.5, 0.5),      # Teal
+]
+
+# Create trimeshes with different colors
+trimeshes = []
+for i, (vvv, ttt) in enumerate(zip(all_verts, all_cam_t)):
+    color = COLORS[i % len(COLORS)]  # Cycle through colors
+    mesh_obj = renderer.vertices_to_trimesh(vvv, ttt.copy(), color)
+    # Set vertex colors for visualization
+    vertex_colors = np.array([(*color, 1.0)] * len(vvv))
+    mesh_obj.visual.vertex_colors = vertex_colors
+    trimeshes.append(mesh_obj)
+
 mesh = trimesh.util.concatenate(trimeshes)
 
 # Get mesh vertices and bounds
@@ -106,10 +129,21 @@ def set_equal_aspect(ax, xlim, ylim, zlim):
 # Create visualization
 fig = plt.figure(figsize=(18, 6))
 
+# Prepare colors for each vertex based on which mesh it belongs to
+vertex_colors_list = []
+vertex_to_mesh_idx = []
+for i, (vvv, ttt) in enumerate(zip(all_verts, all_cam_t)):
+    color = COLORS[i % len(COLORS)]
+    num_vertices = len(vvv)
+    vertex_colors_list.extend([color] * num_vertices)
+    vertex_to_mesh_idx.extend([i] * num_vertices)
+
+vertex_colors_array = np.array(vertex_colors_list)
+
 # View 1: Front view (looking down -Z axis)
 ax1 = fig.add_subplot(131, projection='3d')
 ax1.scatter(mesh_vertices[:, 0], mesh_vertices[:, 1], mesh_vertices[:, 2], 
-           c=mesh_vertices[:, 2], cmap='viridis', s=0.1, alpha=0.6)
+           c=vertex_colors_array, s=0.1, alpha=0.6)
 for start, end, color, label in axis_arrows:
     ax1.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=3, label=label)
@@ -125,7 +159,7 @@ set_equal_aspect(ax1, equal_xlim, equal_ylim, equal_zlim)
 # View 2: Side view (looking down -X axis)
 ax2 = fig.add_subplot(132, projection='3d')
 ax2.scatter(mesh_vertices[:, 0], mesh_vertices[:, 1], mesh_vertices[:, 2], 
-           c=mesh_vertices[:, 2], cmap='viridis', s=0.1, alpha=0.6)
+           c=vertex_colors_array, s=0.1, alpha=0.6)
 for start, end, color, label in axis_arrows:
     ax2.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=3)
@@ -140,7 +174,7 @@ set_equal_aspect(ax2, equal_xlim, equal_ylim, equal_zlim)
 # View 3: Top view (looking down +Y axis)
 ax3 = fig.add_subplot(133, projection='3d')
 ax3.scatter(mesh_vertices[:, 0], mesh_vertices[:, 1], mesh_vertices[:, 2], 
-           c=mesh_vertices[:, 2], cmap='viridis', s=0.1, alpha=0.6)
+           c=vertex_colors_array, s=0.1, alpha=0.6)
 for start, end, color, label in axis_arrows:
     ax3.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=3)
@@ -167,10 +201,11 @@ ax7 = fig2.add_subplot(224, projection='3d')
 # Sample vertices for wireframe (too many points otherwise)
 sample_indices = np.linspace(0, len(mesh_vertices)-1, min(5000, len(mesh_vertices))).astype(int)
 sample_vertices = mesh_vertices[sample_indices]
+sample_colors = vertex_colors_array[sample_indices]
 
 # Isometric view
 ax4.scatter(sample_vertices[:, 0], sample_vertices[:, 1], sample_vertices[:, 2], 
-           c=sample_vertices[:, 2], cmap='viridis', s=1, alpha=0.5)
+           c=sample_colors, s=1, alpha=0.5)
 for start, end, color, label in axis_arrows:
     ax4.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=4, label=label)
@@ -185,7 +220,7 @@ set_equal_aspect(ax4, equal_xlim, equal_ylim, equal_zlim)
 
 # Front
 ax5.scatter(sample_vertices[:, 0], sample_vertices[:, 1], sample_vertices[:, 2], 
-           c=sample_vertices[:, 2], cmap='viridis', s=1, alpha=0.5)
+           c=sample_colors, s=1, alpha=0.5)
 for start, end, color, label in axis_arrows:
     ax5.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=4)
@@ -199,7 +234,7 @@ set_equal_aspect(ax5, equal_xlim, equal_ylim, equal_zlim)
 
 # Side
 ax6.scatter(sample_vertices[:, 0], sample_vertices[:, 1], sample_vertices[:, 2], 
-           c=sample_vertices[:, 2], cmap='viridis', s=1, alpha=0.5)
+           c=sample_colors, s=1, alpha=0.5)
 for start, end, color, label in axis_arrows:
     ax6.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=4)
@@ -213,7 +248,7 @@ set_equal_aspect(ax6, equal_xlim, equal_ylim, equal_zlim)
 
 # Top
 ax7.scatter(sample_vertices[:, 0], sample_vertices[:, 1], sample_vertices[:, 2], 
-           c=sample_vertices[:, 2], cmap='viridis', s=1, alpha=0.5)
+           c=sample_colors, s=1, alpha=0.5)
 for start, end, color, label in axis_arrows:
     ax7.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
             color=color, linewidth=4)
