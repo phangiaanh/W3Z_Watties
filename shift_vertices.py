@@ -20,6 +20,10 @@ import cv2
 import trimesh
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.image as mpimg
+
 # Add the amr module to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -245,6 +249,232 @@ def create_filename_suffix(shifts):
         parts.append(f"idx{index}_{x:+.3f}_{y:+.3f}_{z:+.3f}")
     return "_".join(parts)
 
+def create_camera_view_visualization(renderer, vertices, cam_translations, output_dir, filename_suffix):
+    """
+    Create camera view visualization and render from modified objects.
+    
+    Args:
+        renderer: Renderer instance
+        vertices: Array of vertices (N, V, 3) or list of arrays
+        cam_translations: Array of camera translations (N, 3) or list of arrays
+        output_dir: Output directory for saving files
+        filename_suffix: Suffix for output filenames
+    """
+    print("\n" + "="*60)
+    print("Creating camera view visualization and render...")
+    print("="*60)
+    
+    # Convert to lists if needed
+    if isinstance(vertices, np.ndarray):
+        if vertices.ndim == 2:
+            vertices_list = [vertices]
+        else:
+            vertices_list = [v for v in vertices]
+    else:
+        vertices_list = vertices
+    
+    if isinstance(cam_translations, np.ndarray):
+        if cam_translations.ndim == 1:
+            cam_translations_list = [cam_translations]
+        else:
+            cam_translations_list = [ct for ct in cam_translations]
+    else:
+        cam_translations_list = cam_translations
+    
+    # Define colors for each mesh
+    COLORS = [
+        (1.0, 0.0, 0.0),      # Red
+        (0.0, 0.0, 1.0),      # Blue
+        (1.0, 1.0, 0.0),      # Yellow
+        (0.0, 1.0, 0.0),      # Green
+        (0.0, 1.0, 1.0),      # Cyan
+        (1.0, 0.0, 1.0),      # Magenta
+        (1.0, 0.647, 0.0),    # Orange
+        (0.5, 0.0, 0.5),      # Purple
+        (1.0, 0.752, 0.796),  # Pink
+        (0.0, 0.5, 0.5),      # Teal
+    ]
+    
+    # Create trimeshes with different colors
+    trimeshes = []
+    for i, (vvv, ttt) in enumerate(zip(vertices_list, cam_translations_list)):
+        color = COLORS[i % len(COLORS)]
+        mesh_obj = renderer.vertices_to_trimesh(vvv, ttt.copy(), color)
+        # Set vertex colors for visualization
+        vertex_colors = np.array([(*color, 1.0)] * len(vvv))
+        mesh_obj.visual.vertex_colors = vertex_colors
+        trimeshes.append(mesh_obj)
+    
+    # Combine all meshes
+    mesh = trimesh.util.concatenate(trimeshes)
+    
+    # Get mesh vertices and bounds
+    mesh_vertices = mesh.vertices
+    bounds = mesh.bounds
+    center = mesh.centroid
+    
+    print(f"\nMesh bounds (min, max):")
+    print(f"  X: [{bounds[0][0]:.2f}, {bounds[1][0]:.2f}]")
+    print(f"  Y: [{bounds[0][1]:.2f}, {bounds[1][1]:.2f}]")
+    print(f"  Z: [{bounds[0][2]:.2f}, {bounds[1][2]:.2f}]")
+    print(f"Mesh center: {center}")
+    
+    # Create axis arrows (scale based on mesh size)
+    axis_length = (bounds[1] - bounds[0]).max() * 0.3
+    
+    def create_axis_arrows(center, length):
+        axes = []
+        colors = ['red', 'green', 'blue']
+        directions = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        labels = ['X (Right)', 'Y (Down)', 'Z (Into Screen)']
+        
+        for direction, color, label in zip(directions, colors, labels):
+            end = center + np.array(direction) * length
+            axes.append((center, end, color, label))
+        
+        return axes
+    
+    axis_arrows = create_axis_arrows(center, axis_length)
+    
+    # Calculate equal axis limits
+    max_range = (bounds[1] - bounds[0]).max()
+    mid_x = (bounds[0][0] + bounds[1][0]) / 2
+    mid_y = (bounds[0][1] + bounds[1][1]) / 2
+    mid_z = (bounds[0][2] + bounds[1][2]) / 2
+    half_range = max_range / 2
+    
+    equal_xlim = [mid_x - half_range, mid_x + half_range]
+    equal_ylim = [mid_y - half_range, mid_y + half_range]
+    equal_zlim = [mid_z - half_range, mid_z + half_range]
+    
+    def set_equal_aspect(ax, xlim, ylim, zlim):
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        ax.set_zlim(zlim)
+        x_range = xlim[1] - xlim[0]
+        y_range = ylim[1] - ylim[0]
+        z_range = zlim[1] - zlim[0]
+        ax.set_box_aspect([x_range, y_range, z_range])
+    
+    # Prepare colors for each vertex based on which mesh it belongs to
+    vertex_colors_list = []
+    for i, (vvv, ttt) in enumerate(zip(vertices_list, cam_translations_list)):
+        color = COLORS[i % len(COLORS)]
+        num_vertices = len(vvv)
+        vertex_colors_list.extend([color] * num_vertices)
+    
+    vertex_colors_array = np.array(vertex_colors_list)
+    
+    # Calculate camera position (looking at the mesh center from a reasonable distance)
+    camera_distance = (bounds[1] - bounds[0]).max() * 2.5
+    camera_pos = center + np.array([0, 0, -camera_distance])
+    
+    # Render all meshes using the renderer
+    render_resolution = [512, 512]
+    print(f"\nRendering from camera view (resolution: {render_resolution})...")
+    
+    # Use render_rgba_multiple to render all meshes together
+    rendered_image = renderer.render_rgba_multiple(
+        vertices=vertices_list,
+        cam_t=cam_translations_list,
+        rot_axis=[1, 0, 0],
+        rot_angle=0,
+        mesh_base_color=COLORS[0],  # Base color (individual colors handled by trimesh)
+        scene_bg_color=(1, 1, 1),  # White background
+        render_res=render_resolution,
+        focal_length=None,  # Use default
+    )
+    
+    # Save rendered image
+    rendered_output_path = os.path.join(output_dir, f"camera_view_render_{filename_suffix}.png")
+    mpimg.imsave(rendered_output_path, rendered_image)
+    print(f"Rendered image saved to '{rendered_output_path}'")
+    
+    # Create visualization figure with camera view and render
+    fig = plt.figure(figsize=(16, 8))
+    
+    # Left: Camera view (what the camera sees in 3D space)
+    ax1 = fig.add_subplot(121, projection='3d')
+    # Show mesh from camera perspective
+    ax1.scatter(mesh_vertices[:, 0], mesh_vertices[:, 1], mesh_vertices[:, 2], 
+               c=vertex_colors_array, s=0.1, alpha=0.6)
+    
+    # Draw camera position and viewing direction
+    ax1.scatter([camera_pos[0]], [camera_pos[1]], [camera_pos[2]], 
+               c='red', s=200, marker='^', label='Camera Position', edgecolors='black', linewidths=2)
+    
+    # Draw line from camera to mesh center (viewing direction)
+    ax1.plot([camera_pos[0], center[0]], 
+            [camera_pos[1], center[1]], 
+            [camera_pos[2], center[2]], 
+            'r--', linewidth=2, label='Viewing Direction')
+    
+    # Draw axis arrows
+    for start, end, color, label in axis_arrows:
+        ax1.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 
+                color=color, linewidth=3)
+    
+    ax1.set_xlabel('X (Right)', fontsize=10)
+    ax1.set_ylabel('Y (Down)', fontsize=10)
+    ax1.set_zlabel('Z (Into Screen)', fontsize=10)
+    ax1.set_title('Camera View Setup\n(Red triangle = camera position)', fontsize=12, fontweight='bold')
+    
+    # Set view to show camera position
+    view_vector = center - camera_pos
+    view_vector = view_vector / np.linalg.norm(view_vector)
+    elevation = np.arcsin(view_vector[2]) * 180 / np.pi
+    azimuth = np.arctan2(view_vector[1], view_vector[0]) * 180 / np.pi
+    ax1.view_init(elev=elevation, azim=azimuth)
+    ax1.legend()
+    ax1.grid(True)
+    set_equal_aspect(ax1, equal_xlim, equal_ylim, equal_zlim)
+    
+    # Right: Rendered image (what the camera actually sees)
+    ax2 = fig.add_subplot(122)
+    ax2.imshow(rendered_image)
+    ax2.set_title('Rendered Camera View\n(Actual render from pyrender)', fontsize=12, fontweight='bold')
+    ax2.axis('off')
+    
+    plt.tight_layout()
+    camera_view_path = os.path.join(output_dir, f"camera_view_and_render_{filename_suffix}.png")
+    plt.savefig(camera_view_path, dpi=150, bbox_inches='tight')
+    print(f"Camera view and render saved to '{camera_view_path}'")
+    plt.close()
+    
+    # Also create individual mesh renders with different colors
+    print("\nCreating individual mesh renders...")
+    num_meshes = min(5, len(vertices_list))  # Limit to 5 meshes for visualization
+    fig2 = plt.figure(figsize=(4 * num_meshes, 4))
+    
+    for i in range(num_meshes):
+        vvv = vertices_list[i]
+        ttt = cam_translations_list[i]
+        color = COLORS[i % len(COLORS)]
+        
+        rendered_single = renderer.render_rgba(
+            vertices=vvv,
+            cam_t=ttt,
+            rot_axis=[1, 0, 0],
+            rot_angle=0,
+            mesh_base_color=color,
+            scene_bg_color=(1, 1, 1),
+            render_res=render_resolution,
+            focal_length=None,
+        )
+        
+        ax = fig2.add_subplot(1, num_meshes, i+1)
+        ax.imshow(rendered_single)
+        ax.set_title(f'Mesh {i}\n{COLORS[i % len(COLORS)][:3]}', fontsize=10)
+        ax.axis('off')
+    
+    plt.tight_layout()
+    individual_renders_path = os.path.join(output_dir, f"individual_mesh_renders_{filename_suffix}.png")
+    plt.savefig(individual_renders_path, dpi=150, bbox_inches='tight')
+    print(f"Individual mesh renders saved to '{individual_renders_path}'")
+    plt.close()
+    
+    print("="*60)
+
 def main():
     parser = argparse.ArgumentParser(
         description="Shift vertices and render the result",
@@ -334,6 +564,9 @@ Format: <index>:<x,y,z>
     output_vertices_path = os.path.join(args.output_dir, f"vertices_shifted_{filename_suffix}.npy")
     np.save(output_vertices_path, shifted_verts)
     print(f"Saved shifted vertices to: {output_vertices_path}")
+    
+    # Create camera view visualization and render
+    create_camera_view_visualization(renderer, shifted_verts, all_cam_t, args.output_dir, filename_suffix)
     
     print("\n" + "="*60)
     print("Done!")
