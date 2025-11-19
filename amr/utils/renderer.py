@@ -225,7 +225,11 @@ class Renderer:
         self.img_res = cfg.MODEL.IMAGE_SIZE
 
         self.camera_center = [self.img_res // 2, self.img_res // 2]
-        self.faces = faces.cpu().numpy()
+        # Check if faces is already a numpy array or a PyTorch tensor
+        if isinstance(faces, torch.Tensor):
+            self.faces = faces.cpu().numpy()
+        else:
+            self.faces = faces.copy() if isinstance(faces, np.ndarray) else np.array(faces)
 
     def __call__(self,
              vertices: Union[np.array, List[np.array]],
@@ -281,6 +285,7 @@ class Renderer:
                 raise ValueError(f"Number of boxes ({len(boxes)}) must match number of meshes ({len(vertices)})")
             
             output_img = image.copy()
+            valid_mask_full = np.zeros_like(image[:, :, :1])  # Initialize full image mask
             
             for i, (verts, cam_trans, box, color) in enumerate(zip(vertices, camera_translation, boxes, mesh_base_colors)):
                 print(f"Box {i}: {box} (type: {type(box)})")
@@ -351,9 +356,15 @@ class Renderer:
                 if return_rgba:
                     # For RGBA mode, return the last rendered result
                     output_img = color
+                    # Convert RGB to grayscale and threshold to binary mask
+                    rgb = color[:, :, :3]
+                    grayscale = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+                    valid_mask_full = (grayscale > 0.01).astype(np.float32)[:, :, np.newaxis]
                 else:
                     # Composite this mesh onto the output image
                     valid_mask = (color[:, :, -1])[:, :, np.newaxis]
+                    # Store mask in the full image mask
+                    valid_mask_full[y1:y2, x1:x2] = valid_mask
                     if not side_view:
                         rendered_mesh = color[:, :, :3] * valid_mask + (1 - valid_mask) * image[y1:y2, x1:x2]
                     else:
@@ -362,7 +373,7 @@ class Renderer:
                     # Place the rendered mesh in the correct box area
                     output_img[y1:y2, x1:x2] = rendered_mesh
             
-            return output_img.astype(np.float32)
+            return output_img.astype(np.float32), valid_mask_full
         
         else:
             # Original single mesh rendering logic
@@ -415,7 +426,8 @@ class Renderer:
             renderer.delete()
     
             if return_rgba:
-                return color
+                valid_mask = (color[:, :, -1])[:, :, np.newaxis]
+                return color, valid_mask
     
             valid_mask = (color[:, :, -1])[:, :, np.newaxis]
             if not side_view:
@@ -424,7 +436,7 @@ class Renderer:
                 output_img = color[:, :, :3]
     
             output_img = output_img.astype(np.float32)
-        return output_img
+            return output_img, valid_mask
 
     def vertices_to_trimesh(self, vertices, camera_translation, mesh_base_color=(1.0, 1.0, 0.9),
                             rot_axis=[1, 0, 0], rot_angle=0):

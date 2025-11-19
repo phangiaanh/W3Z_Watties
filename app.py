@@ -183,7 +183,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         # all_verts.append(verts)
         # all_cam_t.append(cam_t)
         print(f"batch['img'][0].shape: {batch['img'][0].shape}")
-        regression_img = renderer([x.detach().cpu().numpy() for x in out['pred_vertices']],
+        regression_img, valid_mask = renderer([x.detach().cpu().numpy() for x in out['pred_vertices']],
                                   [x.detach().cpu().numpy() for x in out['pred_cam_t']],
                                   img_tensor,
                                   mesh_base_color=LIGHT_BLUE,
@@ -243,6 +243,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         np.save(os.path.join(inference_dir, "boxes.npy"), boxes)
         np.save(os.path.join(inference_dir, "vertices.npy"), np.array(all_verts))
         np.save(os.path.join(inference_dir, "cam_translations.npy"), np.array(all_cam_t))
+        np.save(os.path.join(inference_dir, "valid_mask.npy"), valid_mask)
 
         print(f"Saved inference data to: {inference_dir}")
 

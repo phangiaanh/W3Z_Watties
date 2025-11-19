@@ -12,6 +12,7 @@ Usage:
 
 import numpy as np
 import torch
+import pyrender
 import os
 import sys
 import pickle
@@ -24,11 +25,14 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.image as mpimg
 
+from typing import Tuple, Optional, Union, List
+
 # Add the amr module to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from amr.utils.renderer import Renderer
 from amr.configs import get_config
+from visualize_vertex_mapping import visualize_vertex_to_renderer_mapping
 
 # Constants
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
@@ -160,9 +164,9 @@ def create_image_tensor(image_shape):
     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
     return img_tensor
 
-def setup_renderer():
-    """Setup the renderer with model config and faces."""
-    # Load model config
+def setup_renderer(box_width, box_height):
+    # """Setup the renderer with model config and faces."""
+    # # Load model config
     path_model_cfg = 'data/hydra/config.yaml'
     model_cfg = get_config(path_model_cfg)
     
@@ -176,6 +180,9 @@ def setup_renderer():
     renderer = Renderer(model_cfg, faces=faces)
     
     return renderer
+    # return pyrender.OffscreenRenderer(viewport_width=box_width,
+    #                                   viewport_height=box_height,
+    #                                   point_size=1.0)
 
 def render_meshes(renderer, vertices, cam_translations, img_tensor, boxes):
     """Render meshes using the renderer."""
@@ -199,7 +206,7 @@ def render_meshes(renderer, vertices, cam_translations, img_tensor, boxes):
         boxes_list = boxes
     
     # Render
-    regression_img = renderer(
+    regression_img, valid_mask = renderer(
         vertices,
         cam_translations,
         img_tensor,
@@ -210,8 +217,9 @@ def render_meshes(renderer, vertices, cam_translations, img_tensor, boxes):
     
     # Convert to uint8
     regression_img = (regression_img * 255).astype(np.uint8)
+    valid_mask = (valid_mask * 255).astype(np.uint8)
     
-    return regression_img
+    return regression_img, valid_mask
 
 def save_mesh_obj(renderer, vertices, cam_translations, output_path):
     """Save mesh as OBJ file."""
@@ -475,6 +483,270 @@ def create_camera_view_visualization(renderer, vertices, cam_translations, outpu
     
     print("="*60)
 
+def project_multiple_objects_to_mask(
+    vertices: Union[np.ndarray, List[np.ndarray]],
+    camera_translations: Union[np.ndarray, List[np.ndarray]],
+    faces: np.ndarray,
+    image_shape: Tuple[int, int],  # (height, width)
+    boxes: Optional[List[List[int]]] = None,
+    # Camera view parameters
+    focal_length: Optional[float] = None,
+    camera_center: Optional[Tuple[float, float]] = None,
+    camera_pose: Optional[np.ndarray] = None,  # 4x4 matrix, if None uses camera_translations
+    img_res: int = 256,  # Reference resolution for scaling
+    # Mesh transformation parameters
+    side_view: bool = False,
+    rot_angle: float = 0.0,
+    rot_axis: List[float] = [1, 0, 0],
+    # Scene parameters
+    scene_bg_color: Tuple[float, float, float] = (0, 0, 0),
+) -> np.ndarray:
+    """
+    Project multiple 3D objects to a 2D mask on a predefined image shape.
+    
+    Args:
+        vertices: Single array of shape (V, 3) or list of arrays for multiple meshes.
+        camera_translations: Single array of shape (3,) or list of arrays for multiple meshes.
+        faces: Array of shape (F, 3) containing the mesh faces.
+        image_shape: Tuple of (height, width) for the output mask.
+        boxes: Optional list of bounding boxes [x1, y1, x2, y2] for each mesh.
+               If provided, each mesh will be rendered in its corresponding box area.
+        focal_length: Focal length for the camera. If None, uses default based on faces.
+        camera_center: Tuple of (cx, cy) for camera center. If None, uses image center.
+        camera_pose: 4x4 camera pose matrix. If None, constructs from camera_translations.
+        img_res: Reference image resolution for scaling focal length.
+        side_view: Whether to apply side view rotation.
+        rot_angle: Rotation angle in degrees for side view.
+        rot_axis: Rotation axis for mesh transformation.
+        scene_bg_color: Background color for the scene (RGB tuple).
+    
+    Returns:
+        mask: Array of shape (H, W, 1) with values in [0, 1] indicating object projections.
+    """
+    import pyrender
+    import trimesh
+    from amr.utils.renderer import create_raymond_lights
+    
+    # Convert single inputs to lists for uniform processing
+    if isinstance(vertices, np.ndarray):
+        if vertices.ndim == 2:
+            vertices = [vertices]
+        else:
+            vertices = [v for v in vertices]
+    
+    if isinstance(camera_translations, np.ndarray):
+        if camera_translations.ndim == 1:
+            camera_translations = [camera_translations]
+        else:
+            camera_translations = [ct for ct in camera_translations]
+    
+    if len(vertices) != len(camera_translations):
+        raise ValueError(f"Number of vertices ({len(vertices)}) must match number of camera translations ({len(camera_translations)})")
+    
+    # Set default focal length if not provided
+    if focal_length is None:
+        focal_length = 1000. if faces.shape[0] == 7774 else 2167.
+    
+    height, width = image_shape
+    valid_mask_full = np.zeros((height, width, 1), dtype=np.float32)
+    
+    # If boxes are provided, render each mesh in its corresponding box
+    if boxes is not None:
+        if len(boxes) != len(vertices):
+            raise ValueError(f"Number of boxes ({len(boxes)}) must match number of meshes ({len(vertices)})")
+        
+        for i, (verts, cam_trans, box) in enumerate(zip(vertices, camera_translations, boxes)):
+            x1, y1, x2, y2 = [int(coord) for coord in box]
+            box_width = x2 - x1
+            box_height = y2 - y1
+            
+            # Create renderer for this specific box
+            renderer = pyrender.OffscreenRenderer(
+                viewport_width=box_width,
+                viewport_height=box_height,
+                point_size=1.0
+            )
+            
+            # Create material
+            material = pyrender.MetallicRoughnessMaterial(
+                metallicFactor=0.0,
+                alphaMode='OPAQUE',
+                baseColorFactor=(1.0, 1.0, 0.9, 1.0)
+            )
+            
+            # Prepare camera translation
+            cam_trans = cam_trans.copy()
+            cam_trans[0] *= -1.
+            
+            # Create mesh with transformations
+            mesh = trimesh.Trimesh(verts.copy(), faces.copy())
+            
+            if side_view:
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(rot_angle), [0, 1, 0])
+                mesh.apply_transform(rot)
+            
+            # Standard rotation
+            rot = trimesh.transformations.rotation_matrix(
+                np.radians(180), [1, 0, 0])
+            mesh.apply_transform(rot)
+            
+            # Additional rotation if specified
+            if rot_angle != 0 and not side_view:
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(rot_angle), rot_axis)
+                mesh.apply_transform(rot)
+            
+            mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+            
+            # Create scene
+            scene = pyrender.Scene(
+                bg_color=[*scene_bg_color, 0.0],
+                ambient_light=(0.3, 0.3, 0.3)
+            )
+            scene.add(mesh, f'mesh_{i}')
+            
+            # Set up camera for this box
+            if camera_pose is not None:
+                camera_pose_matrix = camera_pose.copy()
+            else:
+                camera_pose_matrix = np.eye(4)
+                camera_pose_matrix[:3, 3] = cam_trans
+            
+            # Calculate camera center relative to the box
+            if camera_center is not None:
+                box_camera_center = [
+                    camera_center[0] - x1,
+                    camera_center[1] - y1
+                ]
+            else:
+                box_camera_center = [box_width / 2., box_height / 2.]
+            
+            # Scale focal length based on box size
+            scale_factor = max(box_height, box_width) / img_res
+            scaled_focal_length = focal_length * scale_factor
+            
+            camera = pyrender.IntrinsicsCamera(
+                fx=scaled_focal_length,
+                fy=scaled_focal_length,
+                cx=box_camera_center[0],
+                cy=box_camera_center[1],
+                zfar=1e12
+            )
+            scene.add(camera, pose=camera_pose_matrix)
+            
+            # Add lighting
+            light_nodes = create_raymond_lights()
+            for node in light_nodes:
+                scene.add_node(node)
+            
+            # Render this mesh
+            color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+            color = color.astype(np.float32) / 255.0
+            renderer.delete()
+            
+            # Extract mask from alpha channel
+            valid_mask = (color[:, :, -1])[:, :, np.newaxis]
+            
+            # Store mask in the full image mask (use maximum to combine multiple meshes)
+            valid_mask_full[y1:y2, x1:x2] = np.maximum(
+                valid_mask_full[y1:y2, x1:x2],
+                valid_mask
+            )
+    
+    else:
+        # Render all meshes on full image
+        renderer = pyrender.OffscreenRenderer(
+            viewport_width=width,
+            viewport_height=height,
+            point_size=1.0
+        )
+        
+        # Create scene
+        scene = pyrender.Scene(
+            bg_color=[*scene_bg_color, 0.0],
+            ambient_light=(0.3, 0.3, 0.3)
+        )
+        
+        # Add all meshes to scene
+        for i, (verts, cam_trans) in enumerate(zip(vertices, camera_translations)):
+            # Create material
+            material = pyrender.MetallicRoughnessMaterial(
+                metallicFactor=0.0,
+                alphaMode='OPAQUE',
+                baseColorFactor=(1.0, 1.0, 0.9, 1.0)
+            )
+            
+            # Prepare camera translation
+            cam_trans = cam_trans.copy()
+            cam_trans[0] *= -1.
+            
+            # Create mesh with transformations
+            mesh = trimesh.Trimesh(verts.copy(), faces.copy())
+            
+            if side_view:
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(rot_angle), [0, 1, 0])
+                mesh.apply_transform(rot)
+            
+            # Standard rotation
+            rot = trimesh.transformations.rotation_matrix(
+                np.radians(180), [1, 0, 0])
+            mesh.apply_transform(rot)
+            
+            # Additional rotation if specified
+            if rot_angle != 0 and not side_view:
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(rot_angle), rot_axis)
+                mesh.apply_transform(rot)
+            
+            mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+            scene.add(mesh, f'mesh_{i}')
+        
+        # Set up camera for full image
+        if camera_pose is not None:
+            camera_pose_matrix = camera_pose.copy()
+        else:
+            # Use first camera translation for pose
+            cam_trans = camera_translations[0].copy()
+            cam_trans[0] *= -1.
+            camera_pose_matrix = np.eye(4)
+            camera_pose_matrix[:3, 3] = cam_trans
+        
+        # Calculate camera center
+        if camera_center is not None:
+            img_camera_center = list(camera_center)
+        else:
+            img_camera_center = [width / 2., height / 2.]
+        
+        # Scale focal length based on image size
+        scale_factor = max(height, width) / img_res
+        scaled_focal_length = focal_length * scale_factor
+        
+        camera = pyrender.IntrinsicsCamera(
+            fx=scaled_focal_length,
+            fy=scaled_focal_length,
+            cx=img_camera_center[0],
+            cy=img_camera_center[1],
+            zfar=1e12
+        )
+        scene.add(camera, pose=camera_pose_matrix)
+        
+        # Add lighting
+        light_nodes = create_raymond_lights()
+        for node in light_nodes:
+            scene.add_node(node)
+        
+        # Render all meshes
+        color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        color = color.astype(np.float32) / 255.0
+        renderer.delete()
+        
+        # Extract mask from alpha channel
+        valid_mask_full = (color[:, :, -1])[:, :, np.newaxis]
+    
+    return valid_mask_full
+
 def main():
     parser = argparse.ArgumentParser(
         description="Shift vertices and render the result",
@@ -535,7 +807,7 @@ Format: <index>:<x,y,z>
     
     # Setup renderer
     print("\nSetting up renderer...")
-    renderer = setup_renderer()
+    renderer = setup_renderer(image_shape[1], image_shape[2])
     
     # Create image tensor
     print("\nCreating image tensor...")
@@ -543,13 +815,18 @@ Format: <index>:<x,y,z>
     
     # Render meshes
     print("\nRendering meshes...")
-    rendered_img = render_meshes(renderer, shifted_verts, all_cam_t, img_tensor, boxes)
+    rendered_img, valid_mask = render_meshes(renderer, shifted_verts, all_cam_t, img_tensor, boxes)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Create filename suffix
     filename_suffix = create_filename_suffix(shifts)
+
+    # Save valid mask
+    output_valid_mask_path = os.path.join(args.output_dir, f"valid_mask_{filename_suffix}.jpg")
+    cv2.imwrite(output_valid_mask_path, valid_mask)
+    print(f"Saved valid mask to: {output_valid_mask_path}")
     
     # Save rendered image
     output_img_path = os.path.join(args.output_dir, f"rendered_shifted_{filename_suffix}.jpg")
@@ -567,6 +844,20 @@ Format: <index>:<x,y,z>
     
     # Create camera view visualization and render
     create_camera_view_visualization(renderer, shifted_verts, all_cam_t, args.output_dir, filename_suffix)
+    
+    # Create vertex-to-renderer mapping visualization
+    print("\nCreating vertex-to-renderer mapping visualization...")
+    mapping_viz_path = os.path.join(args.output_dir, f"vertex_renderer_mapping_{filename_suffix}.png")
+    visualize_vertex_to_renderer_mapping(
+        renderer=renderer,
+        vertices=shifted_verts,
+        camera_translations=all_cam_t,
+        faces=renderer.faces,
+        image_shape=(image_shape[0], image_shape[1]),
+        boxes=boxes.tolist() if isinstance(boxes, np.ndarray) else boxes,
+        # output_path=mapping_viz_path,
+        num_sample_vertices=200,
+    )
     
     print("\n" + "="*60)
     print("Done!")
