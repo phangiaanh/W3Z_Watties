@@ -344,13 +344,66 @@ class Renderer:
             color = color.astype(np.float32) / 255.0
             renderer.delete()
     
+            # Create multi-layer mask: render each mesh separately to get individual masks
+            num_objects = len(vertices)
+            height, width = image.shape[:2]
+            valid_mask = np.zeros((height, width, num_objects), dtype=np.uint8)
+            
+            # Render each mesh individually to create separate mask layers
+            for i, (verts, cam_trans) in enumerate(zip(vertices, camera_translation)):
+                individual_renderer = pyrender.OffscreenRenderer(viewport_width=width,
+                                                                 viewport_height=height,
+                                                                 point_size=1.0)
+                
+                individual_scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
+                                                  ambient_light=(0.3, 0.3, 0.3))
+                
+                # Handle colors - use corresponding color for each mesh
+                if i < len(mesh_base_colors):
+                    color = mesh_base_colors[i]
+                else:
+                    color = mesh_base_colors[0] if mesh_base_colors else (1.0, 1.0, 0.9)
+                
+                material = pyrender.MetallicRoughnessMaterial(
+                    metallicFactor=0.0,
+                    alphaMode='OPAQUE',
+                    baseColorFactor=(*color, 1.0))
+        
+                cam_trans_copy = cam_trans.copy()
+                cam_trans_copy[0] *= -1.
+        
+                mesh = trimesh.Trimesh(verts.copy(), self.faces.copy())
+                if side_view:
+                    rot = trimesh.transformations.rotation_matrix(
+                        np.radians(rot_angle), [0, 1, 0])
+                    mesh.apply_transform(rot)
+                rot = trimesh.transformations.rotation_matrix(
+                    np.radians(180), [1, 0, 0])
+                mesh.apply_transform(rot)
+                mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+                individual_scene.add(mesh, f'mesh_{i}')
+                
+                # Use same camera setup as the combined render
+                individual_scene.add(camera, pose=camera_pose)
+                
+                light_nodes = create_raymond_lights()
+                for node in light_nodes:
+                    individual_scene.add_node(node)
+                
+                individual_color, _ = individual_renderer.render(individual_scene, flags=pyrender.RenderFlags.RGBA)
+                individual_color = individual_color.astype(np.float32) / 255.0
+                individual_renderer.delete()
+                
+                # Store mask for this object in its corresponding layer
+                valid_mask[:, :, i] = (individual_color[:, :, -1] > 0.5).astype(np.uint8)
+    
             if return_rgba:
-                valid_mask = (color[:, :, -1] > 0.5).astype(np.uint8)[:, :, np.newaxis]
                 return color, valid_mask
     
-            valid_mask = (color[:, :, -1] > 0.5).astype(np.uint8)[:, :, np.newaxis]
+            # For compositing, use combined mask (max across all layers)
+            combined_mask = np.max(valid_mask, axis=2, keepdims=True).astype(np.float32)
             if not side_view:
-                output_img = (color[:, :, :3] * valid_mask + (1 - valid_mask) * image)
+                output_img = (color[:, :, :3] * combined_mask + (1 - combined_mask) * image)
             else:
                 output_img = color[:, :, :3]
     
@@ -362,9 +415,10 @@ class Renderer:
             if len(vertices) != len(boxes):
                 raise ValueError(f"Number of vertices ({len(vertices)}) must match number of boxes ({len(boxes)})")
             
-            # Create a full-size mask for the image
+            # Create a multi-layer mask for the image: one layer per object
             height, width = image.shape[:2]
-            valid_mask = np.zeros((height, width, 1), dtype=np.uint8)  # Binary mask
+            num_objects = len(vertices)
+            valid_mask = np.zeros((height, width, num_objects), dtype=np.uint8)  # Multi-layer mask
             
             # Render each mesh in its corresponding box
             for i, (verts, cam_trans, box) in enumerate(zip(vertices, camera_translation, boxes)):
@@ -383,10 +437,11 @@ class Renderer:
                     point_size=1.0
                 )
                 
+                color = mesh_base_colors[i] if i < len(mesh_base_colors) else mesh_base_colors[0]
                 material = pyrender.MetallicRoughnessMaterial(
                     metallicFactor=0.0,
                     alphaMode='OPAQUE',
-                    baseColorFactor=(*mesh_base_colors[i] if i < len(mesh_base_colors) else mesh_base_colors[0], 1.0))
+                    baseColorFactor=(*color, 1.0))
         
                 cam_trans_copy = cam_trans.copy()
                 cam_trans_copy[0] *= -1.
@@ -512,13 +567,10 @@ class Renderer:
                 box_renderer.delete()
                 
                 # Extract binary mask from alpha channel
-                box_mask = (box_color[:, :, 3] > 0.5).astype(np.uint8)[:, :, np.newaxis]
+                box_mask = (box_color[:, :, 3] > 0.5).astype(np.uint8)
                 
-                # Place the mask in the correct position in the full image
-                valid_mask[new_y1:new_y2, new_x1:new_x2] = np.maximum(
-                    valid_mask[new_y1:new_y2, new_x1:new_x2],
-                    box_mask
-                )
+                # Place the mask in the correct position in the full image for this object's layer
+                valid_mask[new_y1:new_y2, new_x1:new_x2, i] = box_mask
             
             # Create output image if needed
             if return_rgba:
@@ -537,10 +589,11 @@ class Renderer:
                                        ambient_light=(0.3, 0.3, 0.3))
                 
                 for i, (verts, cam_trans) in enumerate(zip(vertices, camera_translation)):
+                    color = mesh_base_colors[i] if i < len(mesh_base_colors) else mesh_base_colors[0]
                     material = pyrender.MetallicRoughnessMaterial(
                         metallicFactor=0.0,
                         alphaMode='OPAQUE',
-                        baseColorFactor=(*mesh_base_colors[i] if i < len(mesh_base_colors) else mesh_base_colors[0], 1.0))
+                        baseColorFactor=(*color, 1.0))
             
                     cam_trans_copy = cam_trans.copy()
                     cam_trans_copy[0] *= -1.
@@ -582,8 +635,9 @@ class Renderer:
                 color = color.astype(np.float32) / 255.0
                 renderer.delete()
                 
-                valid_mask_float = valid_mask.astype(np.float32)
-                output_img = (color[:, :, :3] * valid_mask_float + (1 - valid_mask_float) * image)
+                # For compositing, use combined mask (max across all layers)
+                combined_mask = np.max(valid_mask, axis=2, keepdims=True).astype(np.float32)
+                output_img = (color[:, :, :3] * combined_mask + (1 - combined_mask) * image)
             else:
                 output_img = image  # For side view, just return original image
             
