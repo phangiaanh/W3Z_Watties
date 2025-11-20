@@ -184,8 +184,8 @@ def setup_renderer(box_width, box_height):
     #                                   viewport_height=box_height,
     #                                   point_size=1.0)
 
-def render_meshes(renderer, vertices, cam_translations, img_tensor, boxes):
-    """Render meshes using the renderer."""
+def render_meshes(renderer, vertices, cam_translations, img_tensor):
+    """Render meshes using the renderer in a single view."""
     # Convert to lists if needed
     if isinstance(vertices, np.ndarray):
         if vertices.ndim == 2:
@@ -199,20 +199,14 @@ def render_meshes(renderer, vertices, cam_translations, img_tensor, boxes):
         else:
             cam_translations = [ct for ct in cam_translations]
     
-    # Convert boxes to list of lists
-    if isinstance(boxes, np.ndarray):
-        boxes_list = [box.tolist() for box in boxes]
-    else:
-        boxes_list = boxes
-    
-    # Render
+    # Render all meshes in a single view (no boxes)
     regression_img, valid_mask = renderer(
         vertices,
         cam_translations,
         img_tensor,
         mesh_base_color=LIGHT_BLUE,
         scene_bg_color=(1, 1, 1),
-        boxes=boxes_list,
+        boxes=None,  # Explicitly set to None to use single view
     )
     
     # Convert to uint8
@@ -815,7 +809,7 @@ Format: <index>:<x,y,z>
     
     # Render meshes
     print("\nRendering meshes...")
-    rendered_img, valid_mask = render_meshes(renderer, shifted_verts, all_cam_t, img_tensor, boxes)
+    rendered_img, valid_mask = render_meshes(renderer, shifted_verts, all_cam_t, img_tensor)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
