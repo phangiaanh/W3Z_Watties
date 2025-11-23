@@ -341,7 +341,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray, None], List[str]]:
 
         if len(all_verts):
 
-            optimize_meshes(all_verts, all_cam_t, img.shape, boxes, valid_mask, extract_mesh_depths(depth, valid_mask))
+            optimize_meshes(all_verts, all_cam_t, img.shape[0:2], boxes, valid_mask, extract_mesh_depths(depth, np.array(valid_mask)))
             # Return mesh path
             # trimeshes = [renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) for vvv,ttt in zip(all_verts, all_cam_t)]
             # # Join meshes
