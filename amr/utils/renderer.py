@@ -256,9 +256,9 @@ class Renderer:
         """
         
         # Print parameter shapes for debugging
-        print_parameter_shapes(vertices, camera_translation, image, full_frame, imgname,
-                              side_view, rot_angle, mesh_base_color, scene_bg_color,
-                              return_rgba, boxes)
+        # print_parameter_shapes(vertices, camera_translation, image, full_frame, imgname,
+        #                       side_view, rot_angle, mesh_base_color, scene_bg_color,
+        #                       return_rgba, boxes)
         
         # Convert single inputs to lists for uniform processing
         if isinstance(vertices, np.ndarray):
@@ -285,10 +285,10 @@ class Renderer:
                 raise ValueError(f"Number of boxes ({len(boxes)}) must match number of meshes ({len(vertices)})")
             
             output_img = image.copy()
-            valid_mask_full = np.zeros_like(image[:, :, :1])  # Initialize full image mask
+            valid_mask_full = []  # Initialize as list to store separate masks for each mesh
             
             for i, (verts, cam_trans, box, color) in enumerate(zip(vertices, camera_translation, boxes, mesh_base_colors)):
-                print(f"Box {i}: {box} (type: {type(box)})")
+                # print(f"Box {i}: {box} (type: {type(box)})")
                 x1, y1, x2, y2 = [int(coord) for coord in box]
                 box_width = x2 - x1
                 box_height = y2 - y1
@@ -359,12 +359,17 @@ class Renderer:
                     # Convert RGB to grayscale and threshold to binary mask
                     rgb = color[:, :, :3]
                     grayscale = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-                    valid_mask_full = (grayscale > 0.01).astype(np.float32)[:, :, np.newaxis]
+                    # Create full-size mask for this mesh
+                    mask_full = np.zeros_like(image[:, :, :1])
+                    mask_full[y1:y2, x1:x2] = (grayscale > 0.01).astype(np.float32)[:, :, np.newaxis]
+                    valid_mask_full.append(mask_full)
                 else:
                     # Composite this mesh onto the output image
                     valid_mask = (color[:, :, -1])[:, :, np.newaxis]
-                    # Store mask in the full image mask
-                    valid_mask_full[y1:y2, x1:x2] = valid_mask
+                    # Create full-size mask for this mesh and store separately
+                    mask_full = np.zeros_like(image[:, :, :1])
+                    mask_full[y1:y2, x1:x2] = valid_mask
+                    valid_mask_full.append(mask_full)
                     if not side_view:
                         rendered_mesh = color[:, :, :3] * valid_mask + (1 - valid_mask) * image[y1:y2, x1:x2]
                     else:

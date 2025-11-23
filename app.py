@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import json
 import pickle
 from datetime import datetime
+from utils import optimize_camera_translation, shift_vertices_by_translation, create_image_tensor, extract_mesh_depths, save_mesh_obj
 
 
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
@@ -53,6 +54,81 @@ renderer = Renderer(model_cfg, faces=model.smal.faces)
 OUTPUT_FOLDER = "demo_out"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
+
+def optimize_meshes(vertices: np.ndarray, camera_translations: np.ndarray, image_shape: Tuple[int, int], boxes: List[List[int]], valid_mask: np.ndarray, median_depths: List[float]):
+    """
+    Optimize the vertices and camera translations to minimize the error between the projected vertices and the valid mask.
+    Args:
+        vertices: np.ndarray, shape (N, V, 3)
+        camera_translations: np.ndarray, shape (N, 3)
+        image_shape: Tuple[int, int] - (height, width)
+        boxes: List[List[int]]
+        valid_mask: np.ndarray, shape (I, H, W, 1)
+    Returns:
+        vertices: np.ndarray, shape (N, V, 3)
+        camera: Intrinsic camera matrix, shape (I, 3, 3)
+    """
+    trimeshes = [
+        renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) 
+        for vvv, ttt in zip(vertices, camera_translations)
+    ]
+
+    penalties = []
+    final_meshes = []
+    final_camera_translations = []
+
+    for i in trimeshes:
+        penalties.append(i.centroid)
+    img_tensor = create_image_tensor(image_shape)
+
+    # Use this as anchor
+    best_index = np.argmin(median_depths)
+    best_vertices = vertices[best_index]
+    best_camera_translations = camera_translations[best_index]
+
+
+    print(f"Current index: {best_index}")
+    optimized_results = optimize_camera_translation(
+        vertices=shift_vertices_by_translation(best_vertices, best_camera_translations, scale=1),
+        initial_camera_translation=[0,0,0],
+        target_mask=valid_mask[best_index],
+        renderer=renderer,
+        img_tensor=img_tensor,
+        boxes=[[0, 0, image_shape[1], image_shape[0]]],
+        initial_offset=(0.0, 0.0, 0.0),
+    )
+
+    anchor = optimized_results['camera_translation']
+    final_meshes.append(shift_vertices_by_translation(best_vertices, anchor + penalties[best_index]))
+    final_camera_translations.append(camera_translations[best_index])
+    print(f"Optimized camera translation and scale: {optimized_results['camera_translation']}, {optimized_results['scale']}")
+
+    for index, value in enumerate(vertices):
+        if index == best_index:
+            continue
+
+        print(f"Current index: {index}")
+        item_scale = median_depths[index] * anchor[2] / median_depths[best_index]
+        cam_translation = camera_translations[index]
+
+        optimized_results = optimize_camera_translation(
+            vertices=shift_vertices_by_translation(value, cam_translation, scale=1),
+            initial_camera_translation=[0,0,item_scale],
+            target_mask=valid_mask[index],
+            renderer=renderer,
+            img_tensor=img_tensor,
+            boxes=[[0, 0, image_shape[1], image_shape[0]]],
+            initial_offset=(0.0, 0.0, 0.0),
+            not_anchor=True
+        )
+        optimized_camera_translation = optimized_results['camera_translation']
+        optimized_scale = optimized_results['scale']
+        # optimized_camera_translation = [item_scale * optimized_results['camera_translation'][0], optimized_results['camera_translation'][1], optimized_results['camera_translation'][2]]
+        print(f"Optimized camera translation ans scale for index {index}: {optimized_results['camera_translation']}, {optimized_results['scale']}")
+        final_meshes.append(shift_vertices_by_translation(value, optimized_camera_translation + penalties[index], scale=optimized_scale))
+        final_camera_translations.append(camera_translations[index])
+
+    save_mesh_obj(renderer, final_meshes, final_camera_translations, "mesh_optimized.obj")
 
 def resize_max_res_tensor(
     img: torch.Tensor, 
@@ -88,7 +164,7 @@ def resize_max_res_tensor(
 def predict(im):
     return im["composite"]
 
-def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
+def inference(img: Dict)-> Tuple[Union[np.ndarray, None], List[str]]:
     orin_img = np.array(img["background"])[:, :, :-1]
     img = np.array(img["composite"])[:, :, :-1]
 
@@ -104,6 +180,21 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
         for box in results[0].boxes:
             # Convert from xywh to xyxy format
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            
+            # Calculate width and height
+            width = x2 - x1
+            height = y2 - y1
+            
+            # Calculate 20% padding on all sides
+            padding_x = width * 0.2
+            padding_y = height * 0.2
+            
+            # Expand the box by 20% on all sides
+            x1 = max(0, x1 - padding_x)
+            y1 = max(0, y1 - padding_y)
+            x2 = min(img.shape[1], x2 + padding_x)
+            y2 = min(img.shape[0], y2 + padding_y)
+            
             boxes.append([x1, y1, x2, y2])
     
     # If no detections, fall back to full image
@@ -145,7 +236,6 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
     all_verts = []
     all_cam_t = []
     all_model_outputs = []  # Store all model outputs
-    temp_name = next(tempfile._get_candidate_names())
     
     for batch in tqdm(dataloader):
         batch = recursive_to(batch, device)
@@ -247,16 +337,20 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray|None], List[str]]:
 
         print(f"Saved inference data to: {inference_dir}")
 
-        if len(all_verts):
-            # Return mesh path
-            trimeshes = [renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) for vvv,ttt in zip(all_verts, all_cam_t)]
-            # Join meshes
-            mesh = trimesh.util.concatenate(trimeshes)
-            # Save mesh to file
-            mesh_name = os.path.join(inference_dir, "mesh.obj")
-            trimesh.exchange.export.export_mesh(mesh, mesh_name)
 
-            return ([regression_img, annotated_img], mesh_name, depth_colored)
+
+        if len(all_verts):
+
+            optimize_meshes(all_verts, all_cam_t, img.shape, boxes, valid_mask, extract_mesh_depths(depth, valid_mask))
+            # Return mesh path
+            # trimeshes = [renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) for vvv,ttt in zip(all_verts, all_cam_t)]
+            # # Join meshes
+            # mesh = trimesh.util.concatenate(trimeshes)
+            # # Save mesh to file
+            # mesh_name = os.path.join(inference_dir, "mesh.obj")
+            # trimesh.exchange.export.export_mesh(mesh, mesh_name)
+
+            return ([regression_img, annotated_img], "mesh_optimized.obj", depth_colored)
         else:
             return (None, [], None)
 
