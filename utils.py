@@ -335,7 +335,20 @@ def optimize_camera_translation(vertices: np.ndarray,
                                 initial_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
                                 method: str = 'L-BFGS-B',
                                 not_anchor: bool = False,
-                                size_ratio_threshold: float = 1.01) -> Dict:
+                                size_ratio_threshold: float = 1.01,
+                                # Stage 2 hyperparameters
+                                initial_step_ratio: float = 0.01,
+                                min_step_size: float = 0.01,
+                                adaptive_multiplier: float = 0.3,
+                                step_reduction_factor: float = 0.7,
+                                centroid_convergence_threshold: float = 0.5,
+                                max_outer_iterations: int = 50,
+                                max_inner_iterations: int = 5,
+                                iou_tolerance: float = 1e-5,
+                                # Linear relationship parameters (from linearity test)
+                                slope_x: float = 79.4157,
+                                slope_y: float = 86.1128,
+                                use_linear_optimization: bool = True) -> Dict:
     """
     Hierarchical optimization of camera translation offset (tx, ty, sz):
     1. First optimize z (depth) if target mask is smaller than rendered mask
@@ -355,6 +368,14 @@ def optimize_camera_translation(vertices: np.ndarray,
         method: Optimization method (default: 'L-BFGS-B')
         not_anchor: If True, scale vertices directly instead of scaling via camera pose
         size_ratio_threshold: Ratio threshold for size matching (e.g., 1.01 means within 1% difference)
+        initial_step_ratio: Initial step size as ratio of image dimension (default: 0.01 = 1%)
+        min_step_size: Minimum step size for fine-tuning (default: 0.01)
+        adaptive_multiplier: Multiplier for adaptive step based on distance (default: 0.3)
+        step_reduction_factor: Factor to reduce step when no improvement (default: 0.7)
+        centroid_convergence_threshold: Pixel threshold for centroid convergence (default: 0.5)
+        max_outer_iterations: Maximum outer loop iterations (default: 50)
+        max_inner_iterations: Maximum inner loop iterations per coordinate (default: 5)
+        iou_tolerance: IoU error tolerance for convergence (default: 1e-5)
     
     Returns:
         Dictionary containing:
@@ -467,90 +488,452 @@ def optimize_camera_translation(vertices: np.ndarray,
     opt_tx, opt_ty, opt_sz = initial_offset
     
     if abs(size_ratio - size_ratio_threshold) > 0.01:  # Rendered mask is larger than target
-        print(f"Stage 1: Optimizing z (depth). Size ratio: {size_ratio:.4f}")
-        z = opt_scale if not_anchor else opt_sz
-        step = 1
-        min_step = 0.01
-        prev_error = None
-        prev_sign = None
-
-        for _ in range(100):
-            rendered_mask, rendered_area = render_and_get_area(opt_tx, opt_ty, opt_sz, z) if not_anchor else render_and_get_area(opt_tx, opt_ty, z, opt_scale)
-            # print(f"Rendering with z: {z}, rendered_area: {rendered_area}, target_mask_area: {target_mask_area}")
-            if rendered_mask is None:
-                break
-            current_ratio = rendered_area / target_mask_area if target_mask_area > 0 else 1.0
-            error = current_ratio - 1.0
-            sign = 1 if error > 0 else -1
-            if prev_sign is not None and sign != prev_sign:
-                step *= 0.5                        # shrink step
-                # print(" ** Toggle detected → reducing step to", step)
-            prev_error = error
-            prev_sign = sign
-            if abs(error) < 1e-5:
-                break
-            if sign > 0:
-                z += step * (-1 if not_anchor else 1)
+        print(f"Stage 1: Optimizing z (depth) with binary search. Size ratio: {size_ratio:.4f}")
+        
+        z_initial = opt_scale if not_anchor else opt_sz
+        
+        # Establish search bounds based on size ratio
+        # For depth (z): larger z = further away = smaller rendered area
+        # For scale: larger scale = larger rendered area
+        if size_ratio > 1.0:  # Rendered area is too large
+            if not_anchor:
+                # Need to decrease scale to make area smaller
+                z_low = 0.1
+                z_high = z_initial
             else:
-                z -= step * (-1 if not_anchor else 1)
-            if step < min_step:
-                step = min_step
-
-            prev_sign = sign
-            prev_error = error
+                # Need to increase z (move further away) to make area smaller
+                z_low = z_initial
+                z_high = z_initial + 30.0
+        else:  # Rendered area is too small
+            if not_anchor:
+                # Need to increase scale to make area larger
+                z_low = z_initial
+                z_high = 5.0
+            else:
+                # Need to decrease z (move closer) to make area larger
+                z_low = max(z_initial - 30.0, -30.0)
+                z_high = z_initial
+        
+        # Binary search parameters
+        tolerance = 1e-5
+        max_iter = 30
+        best_z = z_initial
+        best_error = float('inf')
+        
+        # Binary search
+        for iteration in range(max_iter):
+            z_mid = (z_low + z_high) / 2.0
+            
+            # Test midpoint
+            if not_anchor:
+                rendered_mask, rendered_area = render_and_get_area(opt_tx, opt_ty, opt_sz, z_mid)
+            else:
+                rendered_mask, rendered_area = render_and_get_area(opt_tx, opt_ty, z_mid, opt_scale)
+            
+            if rendered_mask is None:
+                # If rendering fails, narrow to the working side
+                if z_mid > z_initial:
+                    z_high = z_mid
+                else:
+                    z_low = z_mid
+                continue
+            
+            current_ratio = rendered_area / target_mask_area if target_mask_area > 0 else 1.0
+            error = abs(current_ratio - 1.0)
+            
+            # Track best solution
+            if error < best_error:
+                best_error = error
+                best_z = z_mid
+            
+            # Check convergence
+            if error < tolerance:
+                best_z = z_mid
+                break
+            
+            # Binary search logic: determine which side to search
+            if current_ratio > 1.0:  # Rendered area is too large
+                if not_anchor:
+                    z_high = z_mid  # Decrease scale
+                else:
+                    z_low = z_mid  # Increase z (move further away)
+            else:  # Rendered area is too small
+                if not_anchor:
+                    z_low = z_mid  # Increase scale
+                else:
+                    z_high = z_mid  # Decrease z (move closer)
+            
+            # Check if bounds are too close
+            if abs(z_high - z_low) < tolerance:
+                break
+        
+        # Use best found value
+        z = best_z
         if not_anchor:
             opt_scale = z
         else:
             opt_sz = z
-        print(f"Stage 1 complete. Optimized sz and scale: {opt_sz:.4f}, {opt_scale:.4f}")
+        print(f"Stage 1 complete. Optimized sz: {opt_sz:.4f}, scale: {opt_scale:.4f} "
+              f"(iterations: {iteration+1}, final error: {best_error:.6f})")
     
     # STAGE 2: Optimize x-y once sizes are approximately equal
     # Check current size ratio with optimized z
-    current_mask, current_area = render_and_get_area(opt_tx, opt_ty, opt_sz, opt_scale) if not_anchor else render_and_get_area(opt_tx, opt_ty, opt_sz, opt_scale)
+    current_mask, current_area = render_and_get_area(opt_tx, opt_ty, opt_sz, opt_scale)
     if current_mask is not None:
-        tx, ty = opt_tx, opt_ty
-        prev_error = None
-        step_tx, step_ty = 0.2, 0.2
-        min_step = 0.01
-        alpha = 0.2
-        prev_dir_x = None
-        prev_dir_y = None
-        for _ in range(100):
-            rendered_mask, rendered_area = render_and_get_area(tx, ty, opt_sz, opt_scale) if not_anchor else render_and_get_area(tx, ty, opt_sz, opt_scale)
-            current_iou = iou(rendered_mask, target_mask)
-            error = 1.0 - current_iou
-            # print(f"Rendering with tx: {tx}, ty: {ty}, opt_sz: {opt_sz}, error: {error}")
-
-            if error < 1e-5:
-                break
-
-            c0 = centroid(target_mask)
-            cz = centroid(rendered_mask)
-            # print(f"Centroid of target mask: {c0}, centroid of rendered mask: {cz}")
-            if c0 is None or cz is None:
-                break
-
-            dx = c0[0] - cz[0]   # positive → maskz is left → move tx right
-            dy = c0[1] - cz[1]   # positive → maskz is up → move ty down
-
-            dir_x = 1 if dx > 0 else -1
-            dir_y = 1 if dy > 0 else -1
-
-            # --- Oscillation detection ---
-            if prev_dir_x is not None and dir_x != prev_dir_x:
-                step_tx = max(min_step, step_tx * 0.5)
-            if prev_dir_y is not None and dir_y != prev_dir_y:
-                step_ty = max(min_step, step_ty * 0.5)
-
-            prev_dir_x = dir_x
-            prev_dir_y = dir_y
-
-            # --- Apply step movement ---
-            tx += dir_x * step_tx
-            ty += dir_y * step_ty
-
-        opt_tx, opt_ty = tx, ty 
-        print(f"Stage 2 complete. Optimized tx: {opt_tx:.4f}, ty: {opt_ty:.4f}")
+        # Precompute target mask centroid (constant throughout optimization)
+        c0 = centroid(target_mask)
+        if c0 is None:
+            print("Skipping Stage 2: Target mask has no valid pixels")
+            opt_tx, opt_ty = opt_tx, opt_ty
+        else:
+            if use_linear_optimization:
+                print(f"Stage 2: Optimizing x-y translation using LINEAR relationship. Target centroid: {c0}")
+                print(f"  Using slopes: slope_x={slope_x:.4f}, slope_y={slope_y:.4f}")
+                
+                # Get initial rendered mask centroid
+                cz = centroid(current_mask)
+                if cz is None:
+                    print("Skipping Stage 2: Rendered mask has no valid pixels")
+                    opt_tx, opt_ty = opt_tx, opt_ty
+                else:
+                    # Compute required centroid shifts
+                    dx = c0[0] - cz[0]  # positive → rendered is left → move tx right
+                    dy = c0[1] - cz[1]  # positive → rendered is up → move ty down
+                    
+                    # Use linear relationship to compute required translation deltas
+                    # delta_tx = (centroid_x_shift) / slope_x
+                    # delta_ty = (centroid_y_shift) / slope_y
+                    delta_tx = dx / slope_x
+                    delta_ty = dy / slope_y
+                    
+                    # Apply the computed deltas
+                    opt_tx = opt_tx + delta_tx
+                    opt_ty = opt_ty + delta_ty
+                    
+                    # HYPERPARAMETER TUNING GUIDE:
+                    # - initial_step_ratio: Increase (0.02-0.05) if optimization is too slow or far from target
+                    #                        Decrease (0.005-0.01) if optimization overshoots or oscillates
+                    # - min_step_size: Increase (0.02-0.05) for faster convergence, decrease (0.005-0.01) for precision
+                    # - adaptive_multiplier: Increase (0.4-0.6) for larger steps when far, decrease (0.2-0.3) for stability
+                    # - step_reduction_factor: Increase (0.8-0.9) for slower reduction, decrease (0.5-0.7) for faster
+                    # - centroid_convergence_threshold: Increase (1.0-2.0) for faster convergence, decrease (0.1-0.5) for precision
+                    # - max_outer_iterations: Increase (100-200) if not converging, decrease (20-30) for speed
+                    # - max_inner_iterations: Increase (8-10) for more refinement per coordinate, decrease (3-5) for speed
+                    
+                    # Track previous residuals to detect oscillation
+                    prev_dx = float('inf')
+                    prev_dy = float('inf')
+                    damping_factor = 1.0  # Start with full step
+                    
+                    # Track best state in case we need to recover
+                    best_tx, best_ty = opt_tx, opt_ty
+                    best_mask = current_mask
+                    best_iou = iou(current_mask, target_mask) if current_mask is not None else 0.0
+                    best_cz = cz
+                    
+                    # Track previous centroid for out-of-frame estimation
+                    prev_cz = cz  # Last known valid centroid
+                    prev_tx, prev_ty = opt_tx, opt_ty  # Last known valid position
+                    
+                    for linear_iter in range(max_inner_iterations):
+                        # Render to check current state
+                        final_mask, _ = render_and_get_area(opt_tx, opt_ty, opt_sz, opt_scale)
+                        if final_mask is None:
+                            # Rendering failed, but continue with estimated position
+                            print(f"  Warning: Rendering failed at iteration {linear_iter+1}, using estimated position")
+                            # Estimate centroid based on translation from last known position
+                            if prev_cz is not None:
+                                # Estimate where centroid would be based on translation delta
+                                tx_delta = opt_tx - prev_tx
+                                ty_delta = opt_ty - prev_ty
+                                # Use linear relationship to estimate centroid movement
+                                estimated_cz_x = prev_cz[0] + tx_delta * slope_x
+                                estimated_cz_y = prev_cz[1] + ty_delta * slope_y
+                                final_cz = (estimated_cz_x, estimated_cz_y)
+                            else:
+                                # No previous centroid, use target as fallback
+                                final_cz = c0
+                        else:
+                            final_cz = centroid(final_mask)
+                            if final_cz is None:
+                                # Empty mask - object is out of frame
+                                print(f"  Object out of frame at iteration {linear_iter+1}, using estimated position")
+                                # Estimate centroid based on translation from last known position
+                                if prev_cz is not None:
+                                    tx_delta = opt_tx - prev_tx
+                                    ty_delta = opt_ty - prev_ty
+                                    # Use linear relationship to estimate centroid movement
+                                    estimated_cz_x = prev_cz[0] + tx_delta * slope_x
+                                    estimated_cz_y = prev_cz[1] + ty_delta * slope_y
+                                    final_cz = (estimated_cz_x, estimated_cz_y)
+                                else:
+                                    # No previous centroid, use target as fallback
+                                    final_cz = c0
+                            else:
+                                # Valid centroid - update tracking
+                                prev_cz = final_cz
+                                prev_tx, prev_ty = opt_tx, opt_ty
+                        
+                        # Now we always have a centroid (either real or estimated)
+                        final_dx = c0[0] - final_cz[0]
+                        final_dy = c0[1] - final_cz[1]
+                        
+                        # Compute IoU if we have a valid mask
+                        if final_mask is not None:
+                            final_iou = iou(final_mask, target_mask)
+                            # Track best state only if mask is valid
+                            if final_iou > best_iou:
+                                best_iou = final_iou
+                                best_tx, best_ty = opt_tx, opt_ty
+                                best_mask = final_mask
+                                best_cz = final_cz
+                        else:
+                            # No valid mask, use IoU of 0 but continue optimizing
+                            final_iou = 0.0
+                        
+                        # Check convergence (only if we have a valid mask)
+                        if final_mask is not None and abs(final_dx) <= centroid_convergence_threshold and abs(final_dy) <= centroid_convergence_threshold:
+                            print(f"  Converged after {linear_iter+1} iterations")
+                            break
+                        
+                        # Detect oscillation: check if residual sign flipped OR magnitude increased significantly
+                        oscillation_detected = False
+                        if linear_iter > 0:
+                            # Sign flip detection (more reliable)
+                            if (prev_dx * final_dx < 0 and abs(final_dx) > abs(prev_dx) * 0.5) or \
+                               (prev_dy * final_dy < 0 and abs(final_dy) > abs(prev_dy) * 0.5):
+                                oscillation_detected = True
+                            # Magnitude increase detection (for any magnitude)
+                            elif (abs(final_dx) > abs(prev_dx) * 1.2 and abs(prev_dx) > 1.0) or \
+                                 (abs(final_dy) > abs(prev_dy) * 1.2 and abs(prev_dy) > 1.0):
+                                oscillation_detected = True
+                            
+                            if oscillation_detected:
+                                # Oscillation detected, reduce step size aggressively
+                                damping_factor *= 0.3  # More aggressive reduction
+                                if damping_factor < 0.05:
+                                    damping_factor = 0.05
+                                print(f"  Oscillation detected at iteration {linear_iter+1}, damping={damping_factor:.3f}")
+                                # Restore previous position and try again with smaller step
+                                opt_tx = opt_tx - (final_dx / slope_x) * (1.0 - damping_factor)
+                                opt_ty = opt_ty - (final_dy / slope_y) * (1.0 - damping_factor)
+                                continue  # Re-render with corrected position
+                        
+                        # Adaptive damping: reduce step size as we get closer
+                        residual_magnitude = np.sqrt(final_dx**2 + final_dy**2)
+                        if residual_magnitude < 10.0:
+                            # When close, use smaller steps to avoid overshooting
+                            adaptive_damping = min(1.0, residual_magnitude / 10.0)
+                            damping_factor = min(damping_factor, adaptive_damping)
+                        elif residual_magnitude > 100.0:
+                            # When very far, also use smaller steps to avoid huge jumps
+                            adaptive_damping = min(1.0, 100.0 / residual_magnitude)
+                            damping_factor = min(damping_factor, adaptive_damping)
+                        
+                        # Print progress
+                        out_of_frame_marker = " [OUT]" if final_mask is None or (final_mask is not None and np.sum(final_mask) == 0) else ""
+                        if linear_iter == 0 or abs(final_dx) > 10 or abs(final_dy) > 10 or linear_iter % 5 == 0:
+                            print(f"  Iteration {linear_iter+1}: tx={opt_tx:.4f}, ty={opt_ty:.4f}, residual dx={final_dx:.2f}, dy={final_dy:.2f}, damping={damping_factor:.3f}{out_of_frame_marker}")
+                        
+                        # Refine using linear relationship with damping
+                        refinement_delta_tx = (final_dx / slope_x) * damping_factor
+                        refinement_delta_ty = (final_dy / slope_y) * damping_factor
+                        
+                        # Limit maximum step size to prevent huge jumps
+                        max_step = 2.0  # Maximum translation step
+                        if abs(refinement_delta_tx) > max_step:
+                            refinement_delta_tx = np.sign(refinement_delta_tx) * max_step
+                        if abs(refinement_delta_ty) > max_step:
+                            refinement_delta_ty = np.sign(refinement_delta_ty) * max_step
+                        
+                        opt_tx = opt_tx + refinement_delta_tx
+                        opt_ty = opt_ty + refinement_delta_ty
+                        
+                        # Store previous residuals for oscillation detection
+                        prev_dx = final_dx
+                        prev_dy = final_dy
+                    
+                    # Use best state if we have one and it's better than current
+                    if best_mask is not None and best_iou > final_iou:
+                        opt_tx, opt_ty = best_tx, best_ty
+                        final_mask = best_mask
+                        final_cz = best_cz
+                        if final_cz is not None:
+                            final_dx = c0[0] - final_cz[0]
+                            final_dy = c0[1] - final_cz[1]
+                        final_iou = best_iou
+                    elif final_cz is None:
+                        # If we still don't have a valid centroid, use best or previous
+                        if best_cz is not None:
+                            final_cz = best_cz
+                            final_dx = c0[0] - final_cz[0]
+                            final_dy = c0[1] - final_cz[1]
+                        elif prev_cz is not None:
+                            final_cz = prev_cz
+                            final_dx = c0[0] - final_cz[0]
+                            final_dy = c0[1] - final_cz[1]
+                    print(f"Stage 2 complete (LINEAR). Optimized tx: {opt_tx:.4f}, ty: {opt_ty:.4f}")
+                    if final_cz is not None:
+                        print(f"  Final centroid: {final_cz}, target: {c0}, residual: dx={final_dx:.2f}, dy={final_dy:.2f}")
+                        print(f"  Final IoU: {final_iou:.6f}")
+                    else:
+                        print(f"  Warning: Could not compute final centroid")
+            else:
+                # Original iterative optimization (fallback)
+                print(f"Stage 2: Optimizing x-y translation with coordinate descent. Target centroid: {c0}")
+                
+                # HYPERPARAMETER TUNING GUIDE:
+                # - initial_step_ratio: Increase (0.02-0.05) if optimization is too slow or far from target
+                #                        Decrease (0.005-0.01) if optimization overshoots or oscillates
+                # - min_step_size: Increase (0.02-0.05) for faster convergence, decrease (0.005-0.01) for precision
+                # - adaptive_multiplier: Increase (0.4-0.6) for larger steps when far, decrease (0.2-0.3) for stability
+                # - step_reduction_factor: Increase (0.8-0.9) for slower reduction, decrease (0.5-0.7) for faster
+                # - centroid_convergence_threshold: Increase (1.0-2.0) for faster convergence, decrease (0.1-0.5) for precision
+                # - max_outer_iterations: Increase (100-200) if not converging, decrease (20-30) for speed
+                # - max_inner_iterations: Increase (8-10) for more refinement per coordinate, decrease (3-5) for speed
+                
+                tx, ty = opt_tx, opt_ty
+                tolerance = iou_tolerance
+                min_step = min_step_size
+                max_iterations = max_outer_iterations
+                
+                # Initial step sizes (adaptive based on image size)
+                # Use larger steps for larger images, but ensure minimum step size
+                step_tx = max(min_step * 10, w * initial_step_ratio)  # Default: 1% of image width
+                step_ty = max(min_step * 10, h * initial_step_ratio)  # Default: 1% of image height
+                
+                best_tx, best_ty = tx, ty
+                best_iou = 0.0
+                prev_error = float('inf')
+                no_improvement_count = 0
+                
+                # Coordinate descent: optimize x and y separately
+                for iteration in range(max_iterations):
+                    # Optimize x direction
+                    for x_iter in range(max_inner_iterations):  # Max iterations per coordinate
+                        rendered_mask, _ = render_and_get_area(tx, ty, opt_sz, opt_scale)
+                        if rendered_mask is None:
+                            break
+                        
+                        cz = centroid(rendered_mask)
+                        if cz is None:
+                            break
+                        
+                        dx = c0[0] - cz[0]  # positive → rendered is left → move tx right
+                        
+                        # Check convergence for x
+                        if abs(dx) < centroid_convergence_threshold:  # Pixel difference threshold
+                            break
+                        
+                        # Adaptive step: larger steps when far away, smaller when close
+                        adaptive_step_x = min(step_tx, abs(dx) * adaptive_multiplier)
+                        adaptive_step_x = max(min_step, adaptive_step_x)
+                        
+                        # Move in direction of target centroid
+                        tx_new = tx + (1 if dx > 0 else -1) * adaptive_step_x
+                        
+                        # Test new position
+                        test_mask, _ = render_and_get_area(tx_new, ty, opt_sz, opt_scale)
+                        if test_mask is None:
+                            break
+                        
+                        test_iou = iou(test_mask, target_mask)
+                        current_iou = iou(rendered_mask, target_mask)
+                        
+                        # If improvement, accept; otherwise reduce step
+                        if test_iou > current_iou:
+                            tx = tx_new
+                            if test_iou > best_iou:
+                                best_iou = test_iou
+                                best_tx, best_ty = tx_new, ty
+                        else:
+                            step_tx *= step_reduction_factor  # Reduce step if no improvement
+                            if step_tx < min_step:
+                                break
+                    
+                    # Optimize y direction
+                    for y_iter in range(max_inner_iterations):  # Max iterations per coordinate
+                        rendered_mask, _ = render_and_get_area(tx, ty, opt_sz, opt_scale)
+                        if rendered_mask is None:
+                            break
+                        
+                        cz = centroid(rendered_mask)
+                        if cz is None:
+                            break
+                        
+                        dy = c0[1] - cz[1]  # positive → rendered is up → move ty down
+                        
+                        # Check convergence for y
+                        if abs(dy) < centroid_convergence_threshold:  # Pixel difference threshold
+                            break
+                        
+                        # Adaptive step: larger steps when far away, smaller when close
+                        adaptive_step_y = min(step_ty, abs(dy) * adaptive_multiplier)
+                        adaptive_step_y = max(min_step, adaptive_step_y)
+                        
+                        # Move in direction of target centroid
+                        ty_new = ty + (1 if dy > 0 else -1) * adaptive_step_y
+                        
+                        # Test new position
+                        test_mask, _ = render_and_get_area(tx, ty_new, opt_sz, opt_scale)
+                        if test_mask is None:
+                            break
+                        
+                        test_iou = iou(test_mask, target_mask)
+                        current_iou = iou(rendered_mask, target_mask)
+                        
+                        # If improvement, accept; otherwise reduce step
+                        if test_iou > current_iou:
+                            ty = ty_new
+                            if test_iou > best_iou:
+                                best_iou = test_iou
+                                best_tx, best_ty = tx, ty_new
+                        else:
+                            step_ty *= step_reduction_factor  # Reduce step if no improvement
+                            if step_ty < min_step:
+                                break
+                    
+                    # Check overall convergence
+                    rendered_mask, _ = render_and_get_area(tx, ty, opt_sz, opt_scale)
+                    if rendered_mask is None:
+                        break
+                    
+                    current_iou = iou(rendered_mask, target_mask)
+                    error = 1.0 - current_iou
+                    
+                    # Track best solution
+                    if current_iou > best_iou:
+                        best_iou = current_iou
+                        best_tx, best_ty = tx, ty
+                        no_improvement_count = 0
+                    else:
+                        no_improvement_count += 1
+                    
+                    # Early termination conditions
+                    if error < tolerance:
+                        break
+                    
+                    # If no improvement for several iterations, use best found
+                    if no_improvement_count >= 5:
+                        tx, ty = best_tx, best_ty
+                        break
+                    
+                    # If error increased, restore best and reduce steps
+                    if error > prev_error:
+                        step_tx *= 0.5
+                        step_ty *= 0.5
+                        if step_tx < min_step and step_ty < min_step:
+                            tx, ty = best_tx, best_ty
+                            break
+                    
+                    prev_error = error
+                
+                # Use best found solution
+                opt_tx, opt_ty = best_tx, best_ty
+                final_mask, _ = render_and_get_area(opt_tx, opt_ty, opt_sz, opt_scale)
+                final_iou = iou(final_mask, target_mask) if final_mask is not None else 0.0
+                print(f"Stage 2 complete. Optimized tx: {opt_tx:.4f}, ty: {opt_ty:.4f} "
+                      f"(iterations: {iteration+1}, final IoU: {final_iou:.6f})")
     else:
         print(f"Skipping Stage 2: Rendered mask is None")
 

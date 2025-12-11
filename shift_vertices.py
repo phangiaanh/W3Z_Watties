@@ -36,11 +36,13 @@ from visualize_vertex_mapping import visualize_vertex_to_renderer_mapping
 
 # Constants
 LIGHT_BLUE = (0.85882353, 0.74117647, 0.65098039)
-COWS_DIR = "cows"
+# COWS_DIR = "cows"
+COWS_DIR = "/home/watermelon/demo_out/horseanddog"
+# COWS_DIR = "/home/watermelon/Downloads/inference_20251120_220046_539"
 
 def load_data():
     """Load all necessary data from cows directory."""
-    vertices_file = os.path.join(COWS_DIR, "vertices_backup.npy")
+    vertices_file = os.path.join(COWS_DIR, "vertices.npy")
     boxes_file = os.path.join(COWS_DIR, "boxes.npy")
     cam_translations_file = os.path.join(COWS_DIR, "cam_translations.npy")
     inference_summary_file = os.path.join(COWS_DIR, "inference_summary.json")
@@ -80,38 +82,43 @@ def load_data():
 
 def parse_shift(shift_str):
     """
-    Parse a shift string in the format "index:x,y,z"
+    Parse a shift string in the format "index:x,y,z" or "index:x,y,z,scale"
     
     Args:
-        shift_str: String in format "index:x,y,z"
+        shift_str: String in format "index:x,y,z" or "index:x,y,z,scale"
     
     Returns:
-        tuple: (index, (x, y, z))
+        tuple: (index, (x, y, z, scale)) where scale defaults to 1.0
     """
     try:
         parts = shift_str.split(':')
         if len(parts) != 2:
-            raise ValueError("Format must be 'index:x,y,z'")
+            raise ValueError("Format must be 'index:x,y,z' or 'index:x,y,z,scale'")
         
         index = int(parts[0])
         shift_values = parts[1].split(',')
         
-        if len(shift_values) != 3:
-            raise ValueError("Shift values must be three numbers: x,y,z")
+        if len(shift_values) == 3:
+            x, y, z = [float(v.strip()) for v in shift_values]
+            scale = 1.0  # Default scale
+        elif len(shift_values) == 4:
+            x, y, z, scale = [float(v.strip()) for v in shift_values]
+            if scale <= 0:
+                raise ValueError("Scale must be positive")
+        else:
+            raise ValueError("Shift values must be three numbers (x,y,z) or four numbers (x,y,z,scale)")
         
-        x, y, z = [float(v.strip()) for v in shift_values]
-        
-        return index, (x, y, z)
+        return index, (x, y, z, scale)
     except ValueError as e:
         raise ValueError(f"Invalid shift format '{shift_str}': {e}")
 
 def shift_vertices_multiple(vertices, shifts):
     """
-    Shift multiple meshes by their respective (x, y, z) shifts.
+    Shift and scale multiple meshes by their respective transformations.
     
     Args:
         vertices: Array of vertices (N, V, 3)
-        shifts: Dictionary mapping index to (x, y, z) shift tuple
+        shifts: Dictionary mapping index to (x, y, z, scale) tuple
     
     Returns:
         Modified vertices array
@@ -125,29 +132,50 @@ def shift_vertices_multiple(vertices, shifts):
             raise ValueError("For single mesh, index must be 0")
         verts = vertices
         index = 0
-        x_shift, y_shift, z_shift = shifts[0]
+        x_shift, y_shift, z_shift, scale = shifts[0]
+        
+        # Get mesh center for scaling
+        center = verts.mean(axis=0)
+        
+        # Apply scaling around center
+        if scale != 1.0:
+            verts = (verts - center) * scale + center
+        
+        # Apply translation
         verts[:, 0] += x_shift
         verts[:, 1] += y_shift
         verts[:, 2] += z_shift
         vertices = verts
-        print(f"Shifted mesh {index} by ({x_shift:+.3f}, {y_shift:+.3f}, {z_shift:+.3f})")
+        
+        scale_str = f", scale {scale:.3f}x" if scale != 1.0 else ""
+        print(f"Transformed mesh {index} by shift ({x_shift:+.3f}, {y_shift:+.3f}, {z_shift:+.3f}){scale_str}")
         print(f"  New vertex ranges:")
         print(f"    X: [{verts[:, 0].min():.3f}, {verts[:, 0].max():.3f}]")
         print(f"    Y: [{verts[:, 1].min():.3f}, {verts[:, 1].max():.3f}]")
         print(f"    Z: [{verts[:, 2].min():.3f}, {verts[:, 2].max():.3f}]")
     else:
         # Multiple meshes (N, V, 3)
-        for index, (x_shift, y_shift, z_shift) in shifts.items():
+        for index, (x_shift, y_shift, z_shift, scale) in shifts.items():
             if index < 0 or index >= len(vertices):
                 raise ValueError(f"Index {index} out of range. Valid range: 0-{len(vertices)-1}")
             
             verts = vertices[index]
+            
+            # Get mesh center for scaling
+            center = verts.mean(axis=0)
+            
+            # Apply scaling around center
+            if scale != 1.0:
+                verts = (verts - center) * scale + center
+            
+            # Apply translation
             verts[:, 0] += x_shift
             verts[:, 1] += y_shift
             verts[:, 2] += z_shift
             vertices[index] = verts
             
-            print(f"Shifted mesh {index} by ({x_shift:+.3f}, {y_shift:+.3f}, {z_shift:+.3f})")
+            scale_str = f", scale {scale:.3f}x" if scale != 1.0 else ""
+            print(f"Transformed mesh {index} by shift ({x_shift:+.3f}, {y_shift:+.3f}, {z_shift:+.3f}){scale_str}")
             print(f"  New vertex ranges:")
             print(f"    X: [{verts[:, 0].min():.3f}, {verts[:, 0].max():.3f}]")
             print(f"    Y: [{verts[:, 1].min():.3f}, {verts[:, 1].max():.3f}]")
@@ -217,7 +245,7 @@ def render_meshes(renderer, vertices, cam_translations, img_tensor, boxes):
     
     # Convert to uint8
     regression_img = (regression_img * 255).astype(np.uint8)
-    valid_mask = (valid_mask * 255).astype(np.uint8)
+    # valid_mask = (valid_mask * 255).astype(np.uint8)
     
     return regression_img, valid_mask
 
@@ -238,9 +266,13 @@ def save_mesh_obj(renderer, vertices, cam_translations, output_path):
     
     # Create trimeshes
     trimeshes = [
-        renderer.vertices_to_trimesh(vvv, ttt.copy(), LIGHT_BLUE) 
+        renderer.vertices_to_trimesh(vvv - vvv.mean(axis=0), ttt.copy(), LIGHT_BLUE) 
         for vvv, ttt in zip(vertices, cam_translations)
     ]
+
+    print("Centroids:")
+    for i in trimeshes:
+        print(i.centroid)
     
     # Join meshes
     mesh = trimesh.util.concatenate(trimeshes)
@@ -253,8 +285,11 @@ def create_filename_suffix(shifts):
     """Create a filename suffix from the shifts dictionary."""
     parts = []
     for index in sorted(shifts.keys()):
-        x, y, z = shifts[index]
-        parts.append(f"idx{index}_{x:+.3f}_{y:+.3f}_{z:+.3f}")
+        x, y, z, scale = shifts[index]
+        if scale != 1.0:
+            parts.append(f"idx{index}_{x:+.3f}_{y:+.3f}_{z:+.3f}_s{scale:.3f}")
+        else:
+            parts.append(f"idx{index}_{x:+.3f}_{y:+.3f}_{z:+.3f}")
     return "_".join(parts)
 
 def create_camera_view_visualization(renderer, vertices, cam_translations, output_dir, filename_suffix):
@@ -762,13 +797,14 @@ Examples:
   # Shift with negative values
   python shift_vertices.py 0:-0.5,0.7,-0.5 1:0.2,-0.3,0.4
 
-Format: <index>:<x,y,z>
+Format: <index>:<x,y,z> or <index>:<x,y,z,scale>
   - index: 0-based mesh index
   - x, y, z: shift amounts along each axis (comma-separated)
+  - scale: optional, defaults to 1.0 if omitted
         """
     )
     parser.add_argument('shifts', nargs='+', 
-                       help='Shifts in format "index:x,y,z" (e.g., "0:0.5,0.7,0.5")')
+                       help='Shifts in format "index:x,y,z" (e.g., "0:0.5,0.7,0.5") or "index:x,y,z,scale" (e.g., "0:0.5,0.7,0.5,1.2")')
     parser.add_argument('--output-dir', type=str, default='shifted_output',
                        help='Output directory for rendered images and mesh (default: shifted_output)')
     
@@ -823,10 +859,14 @@ Format: <index>:<x,y,z>
     # Create filename suffix
     filename_suffix = create_filename_suffix(shifts)
 
+    output_mask_path = os.path.join(args.output_dir, f"mask_{filename_suffix}.npy")
+    np.save(output_mask_path, valid_mask)
+    print(f"Saved mask to: {output_mask_path}")
+
     # Save valid mask
-    output_valid_mask_path = os.path.join(args.output_dir, f"valid_mask_{filename_suffix}.jpg")
-    cv2.imwrite(output_valid_mask_path, valid_mask)
-    print(f"Saved valid mask to: {output_valid_mask_path}")
+    # output_valid_mask_path = os.path.join(args.output_dir, f"valid_mask_{filename_suffix}.jpg")
+    # cv2.imwrite(output_valid_mask_path, valid_mask)
+    # print(f"Saved valid mask to: {output_valid_mask_path}")
     
     # Save rendered image
     output_img_path = os.path.join(args.output_dir, f"rendered_shifted_{filename_suffix}.jpg")

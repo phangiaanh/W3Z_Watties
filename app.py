@@ -337,7 +337,7 @@ def inference(img: Dict)-> Tuple[Union[np.ndarray, None], List[str]]:
 
         print(f"Saved inference data to: {inference_dir}")
 
-
+        yield ([regression_img, annotated_img], None, depth_colored)
 
         if len(all_verts):
 
